@@ -61,7 +61,11 @@ pub fn probe(path: &Path, cfg: &ExtractConfig) -> Result<Probe> {
     }
 
     probe.text = condense(&probe.text, cfg.max_chars);
-    probe.scanned = probe.text.len() < cfg.scanned_threshold;
+    // Count characters that carry meaning. Measuring the condensed string
+    // would count the single spaces condense inserts, so a page with two lines
+    // of copyright boilerplate can clear a threshold it should fail.
+    let meaningful = probe.text.chars().filter(|c| !c.is_whitespace()).count();
+    probe.scanned = meaningful < cfg.scanned_threshold;
     Ok(probe)
 }
 
@@ -192,6 +196,15 @@ mod tests {
         assert_eq!(condense("  a \n\n b\tc  ", 100), "a b c");
         assert_eq!(condense("abcdef", 3), "abc");
         assert_eq!(condense("", 10), "");
+    }
+
+    #[test]
+    fn whitespace_does_not_count_towards_the_scan_threshold() {
+        // 30 letters separated by spaces: 59 characters, but only 30 meaningful.
+        let text: String = std::iter::repeat("a ").take(30).collect();
+        let meaningful = text.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(meaningful, 30);
+        assert!(meaningful < text.len(), "spaces must not pad the count");
     }
 
     #[test]

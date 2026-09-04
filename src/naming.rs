@@ -15,6 +15,12 @@ const RESERVED: &[&str] = &[
 /// Longest single path component. ext4 allows 255 bytes; leave room for suffixes.
 const MAX_COMPONENT: usize = 180;
 
+/// Whether a backend effectively declined to name something.
+pub fn is_unknown(title: &str) -> bool {
+    let t = title.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("unknown") || t.eq_ignore_ascii_case("untitled")
+}
+
 /// Make one path component safe: no separators, no control characters, no
 /// leading/trailing dots or spaces, never empty.
 pub fn sanitize_component(raw: &str) -> String {
@@ -140,6 +146,14 @@ mod tests {
     fn long_titles_stay_within_the_component_limit() {
         let name = file_name(&"ä".repeat(500), Path::new("x.pdf"));
         assert!(name.len() <= 255, "{}", name.len());
+    }
+
+    #[test]
+    fn recognises_a_declined_title() {
+        assert!(is_unknown("unknown"));
+        assert!(is_unknown("  Unknown "));
+        assert!(is_unknown(""));
+        assert!(!is_unknown("Mytheos Dungeon"));
     }
 
     #[test]

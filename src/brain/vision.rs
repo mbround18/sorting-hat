@@ -44,8 +44,9 @@ impl VisionBrain {
             n_threads: num_threads(),
             media_marker: std::ffi::CString::new(llama_cpp_2::mtmd::mtmd_default_marker())?,
             // -1 leaves the visual token budget to the model's own default.
+            // Bounding the maximum is what keeps the encoder's buffers in range.
             image_min_tokens: -1,
-            image_max_tokens: -1,
+            image_max_tokens: cfg.image_max_tokens,
         };
         let mtmd = MtmdContext::init_from_file(&cfg.mmproj.to_string_lossy(), model, &params)
             .with_context(|| format!("loading projector {}", cfg.mmproj.display()))?;

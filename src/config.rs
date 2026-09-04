@@ -23,7 +23,8 @@ pub struct ExtractConfig {
     pub pages: usize,
     /// Characters of probe text handed to the model.
     pub max_chars: usize,
-    /// Below this many extracted characters the PDF is treated as a scan.
+    /// Below this many non-whitespace characters across `pages`, the PDF is
+    /// treated as an image scan and handed to the vision pass.
     pub scanned_threshold: usize,
     /// Seconds before an external extractor call is abandoned.
     pub timeout_secs: u64,
@@ -61,6 +62,14 @@ pub struct VisionConfig {
     /// Longest edge of the rendered page, in pixels; the aspect ratio is kept.
     /// Higher reads finer print but costs image tokens quadratically.
     pub max_pixels: u32,
+    /// Upper bound on the tokens the projector may spend on one image. -1 uses
+    /// the model's own default. This is what actually bounds the vision
+    /// encoder's buffers, so cap it here rather than by starving the render.
+    ///
+    /// Measured against Qwen2.5-VL-7B: 2048 is safe, 3072 overruns the encoder
+    /// and aborts llama.cpp from C, which no Rust error handling can catch.
+    /// Raise it only after testing on a handful of documents.
+    pub image_max_tokens: i32,
 }
 
 impl Default for VisionConfig {
@@ -73,7 +82,8 @@ impl Default for VisionConfig {
             context: 8192,
             max_tokens: 512,
             template: "chatml".into(),
-            max_pixels: 1400,
+            max_pixels: 2100,
+            image_max_tokens: 2048,
         }
     }
 }
@@ -107,7 +117,7 @@ impl Default for Config {
 
 impl Default for ExtractConfig {
     fn default() -> Self {
-        Self { pages: 12, max_chars: 6000, scanned_threshold: 200, timeout_secs: 60 }
+        Self { pages: 12, max_chars: 6000, scanned_threshold: 800, timeout_secs: 60 }
     }
 }
 

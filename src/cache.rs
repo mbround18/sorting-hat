@@ -58,6 +58,51 @@ impl Cache {
         Ok(())
     }
 
+    /// Drop entries the backend was unsure of, so they can be read again — by a
+    /// better backend, typically the vision pass over a document that yielded no
+    /// text the first time. Returns how many were dropped.
+    ///
+    /// The log is append-only with last-entry-wins, so removing an entry means
+    /// rewriting the file.
+    pub fn drop_below(&mut self, confidence: f32) -> Result<usize> {
+        let before = self.entries.len();
+        self.entries.retain(|_, d| d.confidence >= confidence);
+        let dropped = before - self.entries.len();
+        if dropped > 0 {
+            self.rewrite()?;
+        }
+        Ok(dropped)
+    }
+
+    /// Drop entries the backend could not name, so a higher-resolution render
+    /// or a different backend can try again. Returns how many were dropped.
+    pub fn drop_unnamed(&mut self) -> Result<usize> {
+        let before = self.entries.len();
+        self.entries.retain(|_, d| !crate::naming::is_unknown(&d.title));
+        let dropped = before - self.entries.len();
+        if dropped > 0 {
+            self.rewrite()?;
+        }
+        Ok(dropped)
+    }
+
+    /// Write the live entries back out, replacing the log.
+    fn rewrite(&self) -> Result<()> {
+        let tmp = self.path.with_extension("jsonl.tmp");
+        {
+            let mut file = File::create(&tmp)
+                .with_context(|| format!("creating {}", tmp.display()))?;
+            for digest in self.entries.values() {
+                writeln!(file, "{}", serde_json::to_string(digest)?)?;
+            }
+            file.flush()?;
+        }
+        // Rename over the original so an interrupted rewrite cannot truncate it.
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))?;
+        Ok(())
+    }
+
     /// Drop every entry. Used by `--rescan`.
     pub fn clear(&mut self) -> Result<()> {
         self.entries.clear();

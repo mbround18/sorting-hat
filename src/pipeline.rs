@@ -27,6 +27,10 @@ pub struct Options {
     pub mode: LinkMode,
     /// Ignore cached digests and re-read every document.
     pub rescan: bool,
+    /// Re-read documents whose cached digest scored below this confidence.
+    pub redigest_below: Option<f32>,
+    /// Re-read documents the backend could not name.
+    pub redigest_unknown: bool,
     /// Stop after this many documents. For trying the pipeline out cheaply.
     pub limit: Option<usize>,
 }
@@ -65,6 +69,15 @@ pub fn build_plan(
     let mut cache = Cache::open(&cfg.cache_dir())?;
     if opts.rescan {
         cache.clear()?;
+    } else {
+        if let Some(threshold) = opts.redigest_below {
+            let dropped = cache.drop_below(threshold)?;
+            tracing::info!(dropped, threshold, "dropped low-confidence digests for a second look");
+        }
+        if opts.redigest_unknown {
+            let dropped = cache.drop_unnamed()?;
+            tracing::info!(dropped, "dropped unnamed digests for a second look");
+        }
     }
 
     let (digests, unfiled) = digest_all(cfg, brain, eyes, &mut cache, &docs)?;
@@ -167,7 +180,12 @@ fn digest_all(
         };
 
         match outcome {
-            Ok((fields, source)) => {
+            Ok((mut fields, source)) => {
+                // A backend that could not read a title must not name the file
+                // "Unknown.pdf" — the original name, however ugly, carries more.
+                if naming::is_unknown(&fields.title) {
+                    fields.title = fallback_title(&doc.path);
+                }
                 let digest = Digest {
                     hash: doc.hash.clone(),
                     path: doc.path.clone(),
@@ -197,6 +215,18 @@ fn digest_all(
     digest_bar.finish_and_clear();
 
     Ok((digests, unfiled))
+}
+
+/// The source file's own stem, tidied, for when nothing better is available.
+fn fallback_title(path: &std::path::Path) -> String {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let cleaned = stem.replace(['_', '.'], " ");
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        "Untitled".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Render the first page and have the vision backend read it.
@@ -358,6 +388,12 @@ mod tests {
         let tax = Taxonomy { leaves: vec!["Solo".into()], notes: vec![] };
         let (_, filings) = fold_thin_leaves(tax, vec![filing("Solo")], 5);
         assert_eq!(filings[0].0, "Solo");
+    }
+
+    #[test]
+    fn unknown_titles_fall_back_to_the_file_name() {
+        assert_eq!(fallback_title(std::path::Path::new("/a/PZO30102E.pdf")), "PZO30102E");
+        assert_eq!(fallback_title(std::path::Path::new("/a/some_map.name.pdf")), "some map name");
     }
 
     #[test]

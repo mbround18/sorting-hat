@@ -34,3 +34,20 @@ max_depth = 3
 min_docs_per_leaf = 3
 # Below this confidence a document goes to _Unsorted rather than being guessed at.
 min_confidence = 0.45
+
+[vision]
+# Used only for PDFs that yield almost no text: map products, poster sheets and
+# image-scanned books. Set enabled = false to skip it entirely.
+enabled = true
+path = "models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+mmproj = "models/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
+gpu_layers = 999
+context = 8192
+max_tokens = 512
+template = "chatml"
+# Longest edge of the rendered page, in pixels; aspect ratio is preserved.
+max_pixels = 2100
+# Caps what the projector may spend on one image. Measured against
+# Qwen2.5-VL-7B: 2048 is safe, 3072 aborts llama.cpp outright. Raising this without
+# this can overrun the vision encoder's buffers and abort llama.cpp outright.
+image_max_tokens = 2048

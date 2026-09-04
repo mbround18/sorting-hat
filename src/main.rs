@@ -84,6 +84,16 @@ enum Command {
         #[arg(long)]
         rescan: bool,
 
+        /// Re-read only the documents whose cached digest scored below this
+        /// confidence. Use it to give text-poor PDFs a second look once the
+        /// vision model is available, without discarding the whole cache.
+        #[arg(long, value_name = "CONFIDENCE")]
+        redigest_below: Option<f32>,
+
+        /// Re-read only the documents the backend could not name.
+        #[arg(long)]
+        redigest_unknown: bool,
+
         /// Only consider the first N documents.
         #[arg(long)]
         limit: Option<usize>,
@@ -131,7 +141,7 @@ fn main() -> Result<()> {
     let cfg = resolve_config(&cli.common)?;
 
     match cli.command {
-        Command::Plan { mode, rescan, limit } => {
+        Command::Plan { mode, rescan, limit, redigest_below, redigest_unknown } => {
             let mut brain = select_backend(&cli.common, &cfg)?;
             tracing::info!(backend = brain.name(), "starting");
 
@@ -140,7 +150,7 @@ fn main() -> Result<()> {
                 tracing::info!(vision = eyes.name(), "vision pass enabled for text-poor PDFs");
             }
 
-            let opts = pipeline::Options { mode, rescan, limit };
+            let opts = pipeline::Options { mode, rescan, limit, redigest_below, redigest_unknown };
             let plan = pipeline::build_plan(
                 &cfg,
                 brain.as_mut(),
