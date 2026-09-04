@@ -89,6 +89,52 @@ pub fn digest_grammar() -> String {
     )
 }
 
+pub fn vision_digest_system() -> String {
+    "You are a librarian cataloguing tabletop roleplaying game PDFs. \
+This document has no extractable text, so you are shown a picture of its first \
+page instead. Read whatever is printed on it — a cover title, a map's name, a \
+product code — and record what the document is. \
+You answer only with JSON matching the requested schema. \
+Use \"unknown\" for any field the page does not tell you."
+        .to_string()
+}
+
+pub fn vision_digest_user(probe: &Probe) -> String {
+    let mut s = String::from("This is the first page of a PDF.\n\n");
+    s.push_str(&format!("File name: {}\n", probe.file_name));
+    if let Some(t) = &probe.pdf_title {
+        s.push_str(&format!("Embedded title: {t}\n"));
+    }
+    if let Some(p) = probe.page_count {
+        s.push_str(&format!("Pages: {p}\n"));
+    }
+    s.push_str(
+        "\nThe file name may be a meaningless product code — if so, ignore it and \
+take the title from the page itself.\n\
+\n\
+Judge the document type from what you see. A single large illustrated \
+location with a grid, or a place drawn from above, is \"maps\" — a battle map \
+or poster map, even when a page or two of description comes with it. A cover \
+with a title and credits belongs to whatever the book is: an adventure, a \
+sourcebook, a bestiary. Pages of stat blocks, spell lists or item entries take \
+their type from that content.\n",
+    );
+    s.push_str(
+        "\nFields:\n\
+- title: the title printed on the page. If nothing is printed, say \"unknown\"\n\
+- game_system: e.g. \"D&D 5e\", \"Pathfinder 1e\", \"system neutral\"\n\
+- doc_type: one of adventure, sourcebook, core rules, setting, bestiary, magic items, \
+character options, spells, maps, random tables, generator, zine, character sheet, reference, other\n\
+- setting: campaign setting if named, else \"unknown\"\n\
+- level_range: e.g. \"1-5\", else \"unknown\"\n\
+- publisher: the logo or imprint on the page, else \"unknown\"\n\
+- topics: three to six short subject keywords for what is depicted\n\
+- summary: one sentence on what a game master would use this for\n\
+- confidence: 0 to 1, based on how much the page actually told you\n",
+    );
+    s
+}
+
 pub fn taxonomy_system(cfg: &TaxonomyConfig) -> String {
     format!(
         "You are designing the folder tree for a tabletop RPG PDF library. \

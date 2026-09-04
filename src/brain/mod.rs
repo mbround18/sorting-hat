@@ -7,7 +7,11 @@
 
 pub mod heuristic;
 #[cfg(feature = "llama")]
+pub mod engine;
+#[cfg(feature = "llama")]
 pub mod llama;
+#[cfg(feature = "llama")]
+pub mod vision;
 pub mod prompt;
 
 use anyhow::Result;
@@ -56,11 +60,11 @@ pub trait Brain {
     /// Backend identifier, recorded on every digest for provenance.
     fn name(&self) -> &str;
 
-    fn digest(&self, probe: &Probe) -> Result<DigestFields>;
+    fn digest(&mut self, probe: &Probe) -> Result<DigestFields>;
 
-    fn design_taxonomy(&self, corpus: &[Digest], cfg: &TaxonomyConfig) -> Result<Taxonomy>;
+    fn design_taxonomy(&mut self, corpus: &[Digest], cfg: &TaxonomyConfig) -> Result<Taxonomy>;
 
-    fn file(&self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing>;
+    fn file(&mut self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing>;
 }
 
 /// Extract the first balanced JSON value from a model response.

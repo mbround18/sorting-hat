@@ -150,7 +150,7 @@ impl Brain for Heuristic {
         "heuristic"
     }
 
-    fn digest(&self, probe: &Probe) -> Result<DigestFields> {
+    fn digest(&mut self, probe: &Probe) -> Result<DigestFields> {
         let name = probe.file_name.to_lowercase();
         let body = probe.text.to_lowercase();
         let haystack = format!("{name} {body}");
@@ -227,7 +227,7 @@ impl Brain for Heuristic {
         })
     }
 
-    fn design_taxonomy(&self, corpus: &[Digest], cfg: &TaxonomyConfig) -> Result<Taxonomy> {
+    fn design_taxonomy(&mut self, corpus: &[Digest], cfg: &TaxonomyConfig) -> Result<Taxonomy> {
         // Count observed system/type pairs, then keep the ones that earn a folder.
         let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         for d in corpus {
@@ -258,7 +258,7 @@ impl Brain for Heuristic {
         Ok(Taxonomy { leaves, notes: Vec::new() })
     }
 
-    fn file(&self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing> {
+    fn file(&mut self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing> {
         let exact = format!("{}/{}", digest.game_system, title_case(&digest.doc_type));
         if taxonomy.contains(&exact) {
             return Ok(Filing {
@@ -333,20 +333,20 @@ mod tests {
 
     #[test]
     fn recognises_a_pathfinder_adventure() {
-        let d = Heuristic.digest(&probe("Skull & Shackles 6.pdf", "A Pathfinder adventure path")).unwrap();
+        let d = (Heuristic).digest(&probe("Skull & Shackles 6.pdf", "A Pathfinder adventure path")).unwrap();
         assert_eq!(d.game_system, "Pathfinder 1e");
         assert_eq!(d.doc_type, "adventure");
     }
 
     #[test]
     fn recognises_random_tables_by_name() {
-        let d = Heuristic.digest(&probe("100 Nordic Encounters.pdf", "d100 table of encounters")).unwrap();
+        let d = (Heuristic).digest(&probe("100 Nordic Encounters.pdf", "d100 table of encounters")).unwrap();
         assert_eq!(d.doc_type, "random tables");
     }
 
     #[test]
     fn pulls_a_level_range_out_of_the_text() {
-        let d = Heuristic.digest(&probe("x.pdf", "An adventure for levels 5 to 10")).unwrap();
+        let d = (Heuristic).digest(&probe("x.pdf", "An adventure for levels 5 to 10")).unwrap();
         assert_eq!(d.level_range, "5-10");
     }
 
@@ -354,7 +354,7 @@ mod tests {
     fn scanned_documents_lose_confidence() {
         let mut p = probe("Ghosts of Saltmarsh.pdf", "");
         p.scanned = true;
-        let d = Heuristic.digest(&p).unwrap();
+        let d = (Heuristic).digest(&p).unwrap();
         assert!(d.confidence < 0.4, "got {}", d.confidence);
     }
 
@@ -382,7 +382,7 @@ mod tests {
             confidence: 0.5,
             source: "heuristic".into(),
         };
-        let filing = Heuristic.file(&digest, &tax).unwrap();
+        let filing = (Heuristic).file(&digest, &tax).unwrap();
         assert!(tax.contains(&filing.folder));
     }
 }

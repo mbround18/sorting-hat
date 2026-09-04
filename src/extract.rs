@@ -4,7 +4,7 @@
 //! stream rather than load, and survive the malformed files that a decade of
 //! scraped RPG PDFs are full of. `lopdf` is the pure-Rust fallback.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -110,6 +110,48 @@ fn read_info_lopdf(path: &Path, probe: &mut Probe) {
     probe.pdf_author = get(b"Author");
     probe.pdf_subject = get(b"Subject");
     probe.pdf_creator = get(b"Creator");
+}
+
+/// Render the first page of a PDF to a PNG, for the vision pass.
+///
+/// Returns the written file. `pdftoppm -singlefile` names the output exactly,
+/// without the page-number suffix it would otherwise append.
+pub fn render_first_page(
+    path: &Path,
+    out_dir: &Path,
+    max_pixels: u32,
+    timeout_secs: u64,
+) -> Result<std::path::PathBuf> {
+    if !poppler() {
+        anyhow::bail!("rendering needs poppler's pdftoppm, which is not installed");
+    }
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("creating {}", out_dir.display()))?;
+
+    // Name the render after the source so a re-run overwrites rather than piles up.
+    let stem = blake3::hash(path.to_string_lossy().as_bytes()).to_hex()[..16].to_string();
+    let prefix = out_dir.join(&stem);
+    // `-scale-to` fixes the longest edge and preserves the aspect ratio, which
+    // matters here: a poster map is far wider than it is tall, and setting the
+    // two axes independently would squash it.
+    let cap = max_pixels.to_string();
+
+    run(
+        timeout_secs,
+        "pdftoppm",
+        &[
+            "-png", "-singlefile", "-f", "1", "-l", "1",
+            "-scale-to", &cap,
+            &path.to_string_lossy(),
+            &prefix.to_string_lossy(),
+        ],
+    )?;
+
+    let png = prefix.with_extension("png");
+    if !png.exists() {
+        anyhow::bail!("pdftoppm produced no image for {}", path.display());
+    }
+    Ok(png)
 }
 
 /// Collapse whitespace and truncate on a character boundary.

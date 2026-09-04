@@ -132,11 +132,21 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Plan { mode, rescan, limit } => {
-            let brain = select_backend(&cli.common, &cfg)?;
+            let mut brain = select_backend(&cli.common, &cfg)?;
             tracing::info!(backend = brain.name(), "starting");
 
+            let mut eyes = select_eyes(&cli.common, &cfg);
+            if let Some(eyes) = &eyes {
+                tracing::info!(vision = eyes.name(), "vision pass enabled for text-poor PDFs");
+            }
+
             let opts = pipeline::Options { mode, rescan, limit };
-            let plan = pipeline::build_plan(&cfg, brain.as_ref(), &opts)?;
+            let plan = pipeline::build_plan(
+                &cfg,
+                brain.as_mut(),
+                eyes.as_deref_mut(),
+                &opts,
+            )?;
 
             std::fs::create_dir_all(&cfg.work_dir)?;
             let path = cfg.plan_path();
@@ -257,6 +267,36 @@ fn select_backend(common: &Common, #[cfg_attr(not(feature = "llama"), allow(unus
             Ok(Box::new(brain::heuristic::Heuristic))
         }
     }
+}
+
+/// Load the vision backend, if it is configured and its files are present.
+///
+/// Its absence is not an error: without it, text-poor PDFs simply fall back to
+/// being judged by file name.
+#[cfg(feature = "llama")]
+fn select_eyes(common: &Common, cfg: &config::Config) -> Option<Box<dyn pipeline::Eyes>> {
+    if !cfg.vision.enabled || common.backend == Backend::Heuristic {
+        return None;
+    }
+    if !cfg.vision.path.exists() || !cfg.vision.mmproj.exists() {
+        tracing::warn!(
+            path = %cfg.vision.path.display(),
+            "no vision model; text-poor PDFs will be judged by file name alone"
+        );
+        return None;
+    }
+    match brain::vision::VisionBrain::load(&cfg.vision) {
+        Ok(eyes) => Some(Box::new(eyes)),
+        Err(err) => {
+            tracing::warn!(%err, "vision backend unavailable");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "llama"))]
+fn select_eyes(_common: &Common, _cfg: &config::Config) -> Option<Box<dyn pipeline::Eyes>> {
+    None
 }
 
 fn load_plan(path: PathBuf) -> Result<Plan> {

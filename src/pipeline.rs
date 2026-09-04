@@ -17,6 +17,12 @@ use crate::{extract, scan};
 /// Where documents go when nothing in the taxonomy fits well enough.
 pub const UNSORTED: &str = "_Unsorted";
 
+/// Describes a page image when a PDF yields no text of its own.
+pub trait Eyes {
+    fn name(&self) -> &str;
+    fn describe(&mut self, image: &std::path::Path, probe: &Probe) -> Result<crate::brain::DigestFields>;
+}
+
 pub struct Options {
     pub mode: LinkMode,
     /// Ignore cached digests and re-read every document.
@@ -36,7 +42,12 @@ fn bar(len: u64, what: &str) -> ProgressBar {
     bar
 }
 
-pub fn build_plan(cfg: &Config, brain: &dyn Brain, opts: &Options) -> Result<Plan> {
+pub fn build_plan(
+    cfg: &Config,
+    brain: &mut dyn Brain,
+    eyes: Option<&mut (dyn Eyes + '_)>,
+    opts: &Options,
+) -> Result<Plan> {
     let exclude = vec![cfg.library.clone(), cfg.work_dir.clone()];
     let paths = scan::find_pdfs(&cfg.source, &exclude)?;
     if paths.is_empty() {
@@ -56,7 +67,7 @@ pub fn build_plan(cfg: &Config, brain: &dyn Brain, opts: &Options) -> Result<Pla
         cache.clear()?;
     }
 
-    let (digests, unfiled) = digest_all(cfg, brain, &mut cache, &docs)?;
+    let (digests, unfiled) = digest_all(cfg, brain, eyes, &mut cache, &docs)?;
     if digests.is_empty() {
         anyhow::bail!("every document failed to produce a digest; nothing to plan");
     }
@@ -84,7 +95,8 @@ pub fn build_plan(cfg: &Config, brain: &dyn Brain, opts: &Options) -> Result<Pla
 /// Read and describe every document, reusing cached digests where possible.
 fn digest_all(
     cfg: &Config,
-    brain: &dyn Brain,
+    brain: &mut dyn Brain,
+    mut eyes: Option<&mut (dyn Eyes + '_)>,
     cache: &mut Cache,
     docs: &[SourceDoc],
 ) -> Result<(Vec<Digest>, Vec<Unfiled>)> {
@@ -135,8 +147,27 @@ fn digest_all(
             }
         };
 
-        match brain.digest(&probe) {
-            Ok(fields) => {
+        // A PDF with no extractable text is a picture. Look at it instead of
+        // guessing from the file name — for a product code like `PZO31005E.pdf`
+        // the file name carries nothing at all.
+        let seen = match (probe.scanned, eyes.as_deref_mut()) {
+            (true, Some(eyes)) => match look(cfg, eyes, doc, &probe) {
+                Ok(fields) => Some((fields, eyes.name().to_string())),
+                Err(err) => {
+                    tracing::warn!(path = %doc.path.display(), %err, "vision pass failed");
+                    None
+                }
+            },
+            _ => None,
+        };
+
+        let outcome = match seen {
+            Some((fields, source)) => Ok((fields, source)),
+            None => brain.digest(&probe).map(|f| (f, brain.name().to_string())),
+        };
+
+        match outcome {
+            Ok((fields, source)) => {
                 let digest = Digest {
                     hash: doc.hash.clone(),
                     path: doc.path.clone(),
@@ -149,7 +180,7 @@ fn digest_all(
                     topics: fields.topics,
                     summary: fields.summary,
                     confidence: fields.confidence.clamp(0.0, 1.0),
-                    source: brain.name().to_string(),
+                    source,
                 };
                 cache.put(digest.clone())?;
                 digests.push(digest);
@@ -168,11 +199,30 @@ fn digest_all(
     Ok((digests, unfiled))
 }
 
+/// Render the first page and have the vision backend read it.
+fn look(
+    cfg: &Config,
+    eyes: &mut (dyn Eyes + '_),
+    doc: &SourceDoc,
+    probe: &Probe,
+) -> Result<crate::brain::DigestFields> {
+    let image = extract::render_first_page(
+        &doc.path,
+        &cfg.render_dir(),
+        cfg.vision.max_pixels,
+        cfg.extract.timeout_secs,
+    )?;
+    let fields = eyes.describe(&image, probe);
+    // The render is a scratch file; keep the work directory from filling up.
+    let _ = std::fs::remove_file(&image);
+    fields
+}
+
 /// Ask the brain where each document belongs. Failures land in `_Unsorted`
 /// rather than dropping the document.
 fn file_all(
     cfg: &Config,
-    brain: &dyn Brain,
+    brain: &mut dyn Brain,
     taxonomy: &Taxonomy,
     digests: &[Digest],
 ) -> Vec<(String, f32, String)> {

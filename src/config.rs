@@ -12,6 +12,7 @@ pub struct Config {
     pub library: PathBuf,
     pub extract: ExtractConfig,
     pub model: ModelConfig,
+    pub vision: VisionConfig,
     pub taxonomy: TaxonomyConfig,
 }
 
@@ -42,6 +43,41 @@ pub struct ModelConfig {
     pub template: String,
 }
 
+/// The vision model, used only for PDFs that yield no extractable text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisionConfig {
+    /// Turn the vision pass off entirely; text-poor PDFs then fall back to
+    /// judging by file name alone.
+    pub enabled: bool,
+    /// A vision-language GGUF.
+    pub path: PathBuf,
+    /// Its multimodal projector. A VL model needs both files.
+    pub mmproj: PathBuf,
+    pub gpu_layers: u32,
+    pub context: u32,
+    pub max_tokens: i32,
+    pub template: String,
+    /// Longest edge of the rendered page, in pixels; the aspect ratio is kept.
+    /// Higher reads finer print but costs image tokens quadratically.
+    pub max_pixels: u32,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: PathBuf::from("models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"),
+            mmproj: PathBuf::from("models/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"),
+            gpu_layers: 999,
+            context: 8192,
+            max_tokens: 512,
+            template: "chatml".into(),
+            max_pixels: 1400,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TaxonomyConfig {
@@ -63,6 +99,7 @@ impl Default for Config {
             library: PathBuf::from("tmp/library"),
             extract: ExtractConfig::default(),
             model: ModelConfig::default(),
+            vision: VisionConfig::default(),
             taxonomy: TaxonomyConfig::default(),
         }
     }
@@ -107,5 +144,10 @@ impl Config {
 
     pub fn plan_path(&self) -> PathBuf {
         self.work_dir.join("plan.json")
+    }
+
+    /// Where rendered pages are written for the vision pass.
+    pub fn render_dir(&self) -> PathBuf {
+        self.work_dir.join("renders")
     }
 }
