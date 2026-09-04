@@ -1,0 +1,36 @@
+# sorting-hat configuration. Every value here can be overridden on the command
+# line; see `sorting-hat --help`.
+
+source  = "/home/mbruno/Nextcloud/DungeonsAndDragons/PDFs"
+work_dir = "tmp"
+library = "tmp/library"
+
+[extract]
+# Leading pages read from each PDF. The front matter is where a TTRPG document
+# says what it is; going deeper costs time and adds little.
+pages = 12
+# Characters of that text handed to the model.
+max_chars = 6000
+# Below this many extracted characters, the PDF is an image scan and is judged
+# from its file name and metadata alone.
+scanned_threshold = 200
+timeout_secs = 60
+
+[model]
+path = "models/Qwen2.5-14B-Instruct-Q5_K_M.gguf"
+# 999 offloads every layer to the GPU. Lower it if VRAM is tight.
+gpu_layers = 999
+context = 8192
+max_tokens = 512
+seed = 1337
+# chatml | llama3 | mistral | plain
+template = "chatml"
+
+[taxonomy]
+max_leaves = 40
+max_depth = 3
+# A folder with fewer documents than this is folded into its parent, so the
+# library does not sprout single-file directories.
+min_docs_per_leaf = 3
+# Below this confidence a document goes to _Unsorted rather than being guessed at.
+min_confidence = 0.45

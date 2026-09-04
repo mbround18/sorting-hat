@@ -1,0 +1,18 @@
+# Build settings for the embedded llama.cpp backend on this machine.
+#
+#   LIBCLANG_PATH  bindgen needs libclang.so.1; Ubuntu ships it under llvm-18.
+#   CUDAHOSTCXX    CUDA 12.0's nvcc rejects GCC 13+, so pin the host compiler.
+#   CUDAARCHS      86 = Ampere (RTX 3090 / 3090 Ti). Building only the arch we
+#                  run on cuts the CUDA compile from many minutes to a few.
+[env]
+LIBCLANG_PATH = "/usr/lib/llvm-18/lib"
+CUDAHOSTCXX = "/usr/bin/g++-12"
+CUDA_PATH = "/usr/lib/cuda"
+CUDAARCHS = "86"
+CMAKE_CUDA_ARCHITECTURES = "86"
+
+# Ubuntu's nvidia-cuda-toolkit splits the runtime libraries into the multiarch
+# directory and leaves /usr/lib/cuda/lib64 empty, so rustc cannot find
+# libcudart_static.a on its own.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-L", "native=/usr/lib/x86_64-linux-gnu"]

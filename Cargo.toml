@@ -1,0 +1,35 @@
+[package]
+name = "sorting-hat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Context-aware GPU-assisted sorter for a firehose of PDFs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+indicatif = { version = "0.17", features = ["rayon"] }
+lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
+rayon = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+
+llama-cpp-2 = { version = "0.1.156", optional = true }
+
+[features]
+default = []
+# Embedded llama.cpp. Requires libclang for bindgen.
+llama = ["dep:llama-cpp-2"]
+# GPU offload via CUDA. Requires the CUDA toolkit (nvcc) on PATH.
+cuda = ["llama", "llama-cpp-2/cuda"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
