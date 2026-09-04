@@ -4,18 +4,29 @@ use anyhow::{anyhow, bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 
+use crate::metadata;
 use crate::types::{LinkMode, Plan, UndoAction, UndoManifest};
+
+/// Above this confidence, our metadata replaces what the PDF already carries.
+const OVERWRITE_CONFIDENCE: f32 = 0.6;
 
 pub struct Report {
     pub filed: usize,
     pub skipped: usize,
     pub failed: Vec<(PathBuf, String)>,
     pub manifest: Option<PathBuf>,
+    pub stamped: usize,
+    pub stamp_failed: Vec<(PathBuf, String)>,
 }
 
 /// Carry out a plan. Every created file is recorded first, so an interrupted
 /// run is still fully reversible.
-pub fn apply(plan: &Plan, work_dir: &Path) -> Result<Report> {
+pub fn apply(plan: &Plan, work_dir: &Path, write_metadata: bool) -> Result<Report> {
+    // Checked before anything is created, so a refused combination costs nothing.
+    if write_metadata {
+        metadata::may_write(plan.mode)?;
+    }
+
     let root = &plan.library_root;
     std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
 
@@ -32,7 +43,14 @@ pub fn apply(plan: &Plan, work_dir: &Path) -> Result<Report> {
         library_root: root.clone(),
         actions: Vec::new(),
     };
-    let mut report = Report { filed: 0, skipped: 0, failed: Vec::new(), manifest: None };
+    let mut report = Report {
+        filed: 0,
+        skipped: 0,
+        failed: Vec::new(),
+        manifest: None,
+        stamped: 0,
+        stamp_failed: Vec::new(),
+    };
 
     for assignment in &plan.assignments {
         bar.inc(1);
@@ -40,11 +58,29 @@ pub fn apply(plan: &Plan, work_dir: &Path) -> Result<Report> {
 
         match place(&assignment.source, &dest, plan.mode) {
             Ok(Placed::Created) => {
+                // Record the file before stamping it: if the stamp fails, undo
+                // must still know the file is there.
                 manifest.actions.push(UndoAction {
-                    created: dest,
+                    created: dest.clone(),
                     original: assignment.source.clone(),
                 });
                 report.filed += 1;
+
+                if write_metadata {
+                    // Replace what the PDF already says only when the backend
+                    // was confident. Publishers' own metadata is often better
+                    // than a hesitant guess, but a confident reading should
+                    // displace an authoring-tool default.
+                    let overwrite = assignment.digest.confidence >= OVERWRITE_CONFIDENCE;
+                    match metadata::stamp(&dest, &assignment.digest, overwrite) {
+                        Ok(fields) if !fields.is_empty() => report.stamped += 1,
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!(path = %dest.display(), %err, "could not stamp metadata");
+                            report.stamp_failed.push((dest, format!("{err:#}")));
+                        }
+                    }
+                }
             }
             Ok(Placed::AlreadyThere) => report.skipped += 1,
             Err(err) => {

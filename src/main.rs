@@ -6,6 +6,7 @@ mod brain;
 mod cache;
 mod config;
 mod extract;
+mod metadata;
 mod naming;
 mod pipeline;
 mod report;
@@ -115,8 +116,15 @@ enum Command {
         plan: Option<PathBuf>,
 
         /// Skip the confirmation prompt.
-        #[arg(long, short= 'y')]
+        #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Write the title, author, subject and keywords into each PDF, so the
+        /// naming travels with the file. Needs a plan made with --mode copy or
+        /// --mode move: a hard link or symlink is the same file as the
+        /// original, and stamping one would rewrite your source PDFs.
+        #[arg(long)]
+        write_metadata: bool,
     },
 
     /// Reverse an applied run.
@@ -181,11 +189,16 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Apply { plan, yes } => {
+        Command::Apply { plan, yes, write_metadata } => {
             let path = plan.unwrap_or_else(|| cfg.plan_path());
             let plan = load_plan(path)?;
 
             println!("\n{}", report::summary(&plan));
+            if write_metadata {
+                // Fail before the prompt rather than after the work.
+                metadata::may_write(plan.mode)?;
+                println!("  Each filed PDF will be stamped with its title, author and keywords.\n");
+            }
             if plan.mode == LinkMode::Move {
                 println!("  This MOVES the originals out of {}.\n", plan.source_root.display());
             }
@@ -195,7 +208,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let outcome = apply::apply(&plan, &cfg.work_dir)?;
+            let outcome = apply::apply(&plan, &cfg.work_dir, write_metadata)?;
             println!(
                 "\nfiled {}, already present {}, failed {}",
                 outcome.filed,
@@ -204,6 +217,12 @@ fn main() -> Result<()> {
             );
             for (path, err) in &outcome.failed {
                 println!("  {} — {err}", path.display());
+            }
+            if write_metadata {
+                println!("stamped {} PDFs, {} could not be stamped", outcome.stamped, outcome.stamp_failed.len());
+                for (path, err) in &outcome.stamp_failed {
+                    println!("  {} — {err}", path.display());
+                }
             }
             if let Some(manifest) = &outcome.manifest {
                 println!("\nundo with: sorting-hat undo {}", manifest.display());

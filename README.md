@@ -48,6 +48,41 @@ costs no extra disk and the originals are never touched. `--mode symlink`,
 Digests are cached by content fingerprint, so a second run only reads documents
 that are new — and renaming a source file doesn't invalidate its entry.
 
+## Writing the naming back into the PDF
+
+    sorting-hat plan --mode copy
+    sorting-hat apply --write-metadata
+
+A folder tree lives only in this tool's head — copy a file out of the library
+and the knowledge is gone. `--write-metadata` stamps what the model worked out
+into the PDF's own Info dictionary: title, author (the publisher), subject (the
+one-line summary) and keywords (system, type, setting, level range, topics). It
+travels with the file, into every reader and file manager.
+
+**It refuses to run in `hardlink` or `symlink` mode.** A hard link *is* the
+original file — same inode — and a symlink points straight at it, so stamping
+either would rewrite your source PDFs in place. Only `copy` and `move` produce a
+file that is yours to change. The check happens before anything is created.
+
+Existing metadata is only replaced when the backend was confident (0.6 and
+above). Below that, whatever the publisher set wins. This is what lets a
+confident reading displace an authoring-tool default like `Diapositiva 1` while
+a hesitant guess leaves a real title alone.
+
+Every rewrite is written beside the target and renamed over it, and is checked
+for plausibility first: a file that comes back at less than half its size, or
+appreciably larger, is discarded and the good PDF left untouched.
+
+### Known limitation
+
+Around 18% of a typical collection (74 of 406 in the test corpus) uses
+cross-reference and object streams — `pdfinfo` reports `Optimized: yes`. `lopdf`
+cannot write those back, so it rebuilds the file expanded: one 2.8 MB rulebook
+came back at 8.2 MB. The size guard catches this and skips the stamp, so those
+documents are still filed and renamed correctly — they just keep their original
+metadata. Running the library through `qpdf --object-streams=generate` afterwards
+would recover the compression if it matters.
+
 ## Backends
 
 - `--backend llama` — a local GGUF model, all layers on the GPU. This is the one

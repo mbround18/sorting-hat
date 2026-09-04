@@ -74,6 +74,9 @@ pub struct Assignment {
     pub title: String,
     pub confidence: f32,
     pub reason: String,
+    /// The catalogue entry behind this filing, carried so `apply` can stamp it
+    /// into the PDF without re-reading anything.
+    pub digest: Digest,
 }
 
 /// The full reviewable plan written to disk before anything moves.

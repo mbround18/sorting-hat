@@ -217,15 +217,17 @@ fn digest_all(
     Ok((digests, unfiled))
 }
 
-/// The source file's own stem, tidied, for when nothing better is available.
+/// The source file's own name, unchanged, for when nothing better is known.
+///
+/// Deliberately not tidied: if no backend could read a title, the name the file
+/// arrived with is the only real information left, and altering it would only
+/// make the document harder to trace back to its source.
 fn fallback_title(path: &std::path::Path) -> String {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let cleaned = stem.replace(['_', '.'], " ");
-    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    if stem.is_empty() {
         "Untitled".to_string()
     } else {
-        cleaned
+        stem
     }
 }
 
@@ -348,6 +350,7 @@ fn to_assignments(digests: &[Digest], filings: &[(String, f32, String)]) -> Vec<
             title: digest.title.clone(),
             confidence: *confidence,
             reason: reason.clone(),
+            digest: digest.clone(),
         });
     }
 
@@ -392,8 +395,9 @@ mod tests {
 
     #[test]
     fn unknown_titles_fall_back_to_the_file_name() {
+        // The original name is preserved verbatim, punctuation and all.
         assert_eq!(fallback_title(std::path::Path::new("/a/PZO30102E.pdf")), "PZO30102E");
-        assert_eq!(fallback_title(std::path::Path::new("/a/some_map.name.pdf")), "some map name");
+        assert_eq!(fallback_title(std::path::Path::new("/a/some_map.name.pdf")), "some_map.name");
     }
 
     #[test]

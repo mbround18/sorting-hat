@@ -138,7 +138,13 @@ fn usable_pdf_title(title: &str) -> bool {
         return false;
     }
     let lower = t.to_lowercase();
-    const JUNK: &[&str] = &["untitled", "microsoft word", "document1", ".indd", ".qxd", ".pdf", "layout"];
+    // Application defaults that are never a real work's title. "Diapositiva 1"
+    // is PowerPoint's first slide in Spanish, and it renamed a real sourcebook
+    // in testing.
+    const JUNK: &[&str] = &[
+        "untitled", "microsoft word", "document1", ".indd", ".qxd", ".pdf", "layout",
+        "diapositiva", "slide ", "presentation", "powerpoint", "print_cover", "final.doc",
+    ];
     if JUNK.iter().any(|j| lower.contains(j)) {
         return false;
     }
@@ -362,6 +368,7 @@ mod tests {
     fn rejects_junk_embedded_titles() {
         assert!(!usable_pdf_title("Microsoft Word - draft.doc"));
         assert!(!usable_pdf_title("Untitled"));
+        assert!(!usable_pdf_title("Diapositiva 1"));
         assert!(usable_pdf_title("Ghosts of Saltmarsh"));
     }
 
