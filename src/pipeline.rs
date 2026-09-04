@@ -288,57 +288,83 @@ fn ensure_every_system_has_a_home(mut taxonomy: Taxonomy, digests: &[Digest]) ->
 
 /// Fold together documents that are the same work saved twice.
 ///
-/// Exact copies are caught by fingerprint before anything is read. This catches
-/// the re-download: same title, same page count, a few kilobytes apart because
-/// the metadata or compression differs. The largest copy is kept — it is the
-/// least likely to have been through a lossy re-save — and the rest are listed
-/// as duplicates rather than filed alongside as "Title (2)".
+/// Exact copies are caught by SHA-256 before anything is read. This catches the
+/// re-save, and the signal is the text rather than the name or the size: the
+/// same book recompressed can differ by 16% in bytes, and the model may title
+/// it "The Skeleton Key" one time and "The Skeleton Key Adventure" the next,
+/// but its words are identical. Documents are compared only within a page
+/// count, since a different length means a different edition.
+///
+/// A document with too little text to identify — a map, a scan — falls back to
+/// being compared by size. That fallback is the point of `min_text_chars`:
+/// without it every image-only PDF hashes to the empty string and matches all
+/// the others.
 fn fold_near_duplicates(cfg: &Config, digests: Vec<Digest>) -> (Vec<Digest>, Vec<Duplicate>) {
-    let mut groups: HashMap<String, Vec<Digest>> = HashMap::new();
+    let size = |path: &PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    // Page count first: it is cheap, and documents of different lengths are
+    // different documents, so it shrinks what has to be read in full.
+    let pages: HashMap<PathBuf, Option<usize>> = digests
+        .par_iter()
+        .map(|d| (d.path.clone(), extract::page_count(&d.path, cfg.extract.timeout_secs)))
+        .collect();
+
+    let mut by_pages: HashMap<Option<usize>, Vec<Digest>> = HashMap::new();
     for digest in digests {
-        groups.entry(title_key(&digest.title)).or_default().push(digest);
+        by_pages.entry(pages.get(&digest.path).copied().flatten()).or_default().push(digest);
     }
 
-    // Page counts are only needed for titles that actually collide.
-    let contested: Vec<PathBuf> = groups
+    // Only documents sharing a page count are worth reading in full.
+    let contested: Vec<PathBuf> = by_pages
         .values()
         .filter(|g| g.len() > 1)
         .flat_map(|g| g.iter().map(|d| d.path.clone()))
         .collect();
-    let pages: HashMap<PathBuf, Option<usize>> = contested
+    if !contested.is_empty() {
+        tracing::info!(documents = contested.len(), "reading text to compare possible duplicates");
+    }
+    let keys: HashMap<PathBuf, Option<String>> = contested
         .par_iter()
-        .map(|path| (path.clone(), extract::page_count(path, cfg.extract.timeout_secs)))
+        .map(|path| {
+            (
+                path.clone(),
+                extract::content_key(path, cfg.dedupe.min_text_chars, cfg.extract.timeout_secs),
+            )
+        })
         .collect();
-
-    let size = |path: &PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     let mut kept = Vec::new();
     let mut duplicates = Vec::new();
 
-    for (_, mut group) in groups {
+    for (_, mut group) in by_pages {
         if group.len() == 1 {
             kept.append(&mut group);
             continue;
         }
-        // Largest first: that copy becomes the candidate every other is judged against.
+        // Largest first, so the copy that survives is the least recompressed.
         group.sort_by_key(|d| std::cmp::Reverse(size(&d.path)));
 
         while !group.is_empty() {
             let winner = group.remove(0);
+            let winner_key = keys.get(&winner.path).cloned().flatten();
             let winner_size = size(&winner.path);
-            let winner_pages = pages.get(&winner.path).copied().flatten();
 
             let mut same = Vec::new();
             group.retain(|other| {
-                let other_pages = pages.get(&other.path).copied().flatten();
-                // A different page count means a different edition or printing,
-                // not a re-save; keep both and let the user see them.
-                if winner_pages != other_pages {
-                    return true;
-                }
-                let other_size = size(&other.path);
-                let spread = winner_size.abs_diff(other_size) as f32 / winner_size.max(1) as f32;
-                if spread <= cfg.dedupe.size_tolerance {
+                let other_key = keys.get(&other.path).cloned().flatten();
+                let identical = match (&winner_key, &other_key) {
+                    // Both readable: the words decide, whatever the bytes say.
+                    (Some(a), Some(b)) => a == b,
+                    // Neither readable: nothing to compare but size.
+                    (None, None) => {
+                        let spread = winner_size.abs_diff(size(&other.path)) as f32
+                            / winner_size.max(1) as f32;
+                        spread <= cfg.dedupe.size_tolerance
+                    }
+                    // One readable and one not is not the same document.
+                    _ => false,
+                };
+                if identical {
                     same.push(other.path.clone());
                     false
                 } else {
@@ -360,18 +386,6 @@ fn fold_near_duplicates(cfg: &Config, digests: Vec<Digest>) -> (Vec<Digest>, Vec
     kept.sort_by(|a, b| a.path.cmp(&b.path));
     duplicates.sort_by(|a, b| a.kept.cmp(&b.kept));
     (kept, duplicates)
-}
-
-/// A title reduced to what identifies the work, for grouping re-saves.
-fn title_key(title: &str) -> String {
-    title
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Render the first page and have the vision backend read it.
@@ -577,13 +591,6 @@ mod tests {
         };
         let tax = ensure_every_system_has_a_home(tax, &[digest_for("Cyberpunk Red")]);
         assert_eq!(tax.leaves, vec!["Cyberpunk Red/Core Rules".to_string()]);
-    }
-
-    #[test]
-    fn title_key_ignores_punctuation_and_case() {
-        assert_eq!(title_key("Ghosts of Saltmarsh"), title_key("ghosts  of saltmarsh"));
-        assert_eq!(title_key("Skull & Shackles: Part 6"), "skull shackles part 6");
-        assert_ne!(title_key("Volo's Guide"), title_key("Xanathar's Guide"));
     }
 
     #[test]

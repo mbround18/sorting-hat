@@ -116,6 +116,31 @@ fn read_info_lopdf(path: &Path, probe: &mut Probe) {
     probe.pdf_creator = get(b"Creator");
 }
 
+/// A hash of everything the PDF says, for recognising the same work saved
+/// twice. Returns `None` when the document yields too little text to identify
+/// it — an image-only PDF would otherwise hash to the empty string and match
+/// every other image-only PDF in the collection.
+pub fn content_key(path: &Path, min_chars: usize, timeout_secs: u64) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    if !poppler() {
+        return None;
+    }
+    let text = run(timeout_secs, "pdftotext", &["-q", "-enc", "UTF-8", &path.to_string_lossy(), "-"])
+        .ok()?;
+
+    // Whitespace differs between re-saves of the same document; the words do not.
+    let mut hasher = Sha256::new();
+    let mut chars = 0usize;
+    for c in text.chars().filter(|c| !c.is_whitespace()) {
+        let mut buf = [0u8; 4];
+        hasher.update(c.encode_utf8(&mut buf).as_bytes());
+        chars += 1;
+    }
+
+    (chars >= min_chars).then(|| format!("{:x}", hasher.finalize()))
+}
+
 /// Page count alone, without extracting any text.
 pub fn page_count(path: &Path, timeout_secs: u64) -> Option<usize> {
     if !poppler() {

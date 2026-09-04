@@ -56,9 +56,13 @@ image_max_tokens = 2048
 # Exact duplicates are always found by SHA-256. This is the other case: the same
 # work re-saved, differing by a few kilobytes, which no hash can match.
 near_duplicates = true
-# How much two files may differ in size and still be the same work. Re-saves in
-# this collection differed by 0.03% to 1.2%.
+# Only used for documents with too little text to compare by content.
+# How much two files may differ in size and still be the same work.
 size_tolerance = 0.05
+# Characters of text a document needs before its content can identify it. Below
+# this it is compared by size instead: without this guard every image-only PDF
+# hashes to the empty string and matches all the others.
+min_text_chars = 500
 
 [systems.aliases]
 # Folds spellings of one system together, so it cannot compete with itself for a

@@ -58,15 +58,29 @@ to hash anything less than all of it. The hashes are the ordinary ones — check
 any of them with `sha256sum`.
 
 **The same work saved twice** is the harder case, and no hash will ever find it.
-A re-download differs from the original by a few kilobytes of metadata or
-compression, so its hash is completely different. In the test corpus that was
-109 titles — 218 files, 2.70 GB — against a single exact duplicate. They are
-matched instead on title, page count, and file size within a tolerance: a
-different page count means a different edition, so both are kept. The largest
-copy is filed and the rest are listed under `duplicates` in the plan. Nothing is
-ever deleted.
+A re-save differs in its bytes — by as much as 16% when the images were
+recompressed — so its hash is completely different. In the test corpus that was
+150 groups and 3.49 GB, against a single exact duplicate.
 
-Turn the second one off with `[dedupe] near_duplicates = false`.
+The signal is the text, not the name and not the size. Two things this rules
+out, both taken from real files here:
+
+- `Player's Basic Rules.pdf` at 2.4 MB and 2.9 MB — 16% apart in bytes, 114
+  pages each, and identical word for word.
+- The same adventure catalogued once as "The Skeleton Key" and once as "The
+  Skeleton Key Adventure", because the model read the cover twice and phrased it
+  differently.
+
+Documents are only compared within a page count — a different length means a
+different edition — and the largest copy is kept, being the least recompressed.
+
+A document with too little text to identify itself, such as a map, is compared
+by file size instead. This is what `min_text_chars` guards: without it every
+image-only PDF hashes to the empty string and matches all the others. There were
+13 such files here.
+
+Nothing is ever deleted; the copies that are not filed are listed under
+`duplicates` in the plan. Turn this off with `[dedupe] near_duplicates = false`.
 
 ## Writing the naming back into the PDF
 

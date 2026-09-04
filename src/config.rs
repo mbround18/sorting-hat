@@ -101,22 +101,27 @@ pub struct SystemsConfig {
 
 /// Catching the same work saved twice.
 ///
-/// Exact duplicates are found by fingerprint before anything is read. This
-/// covers the other case: a re-download that differs by a few kilobytes of
-/// metadata and so has a different hash, but is plainly the same document.
+/// Exact copies are found by SHA-256 before anything is read. This covers the
+/// other case: a re-save whose bytes differ — by as much as 16% when the images
+/// were recompressed — but whose text is identical word for word.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DedupeConfig {
     pub near_duplicates: bool,
-    /// How much two files may differ in size and still be the same work,
-    /// as a fraction of the larger. Re-saves observed here differed by
-    /// 0.03% to 1.2%.
+    /// How much two files may differ in size and still be the same work, as a
+    /// fraction of the larger. Only used for documents with too little text to
+    /// compare by content.
     pub size_tolerance: f32,
+    /// Characters of extracted text a document needs before its content can
+    /// identify it. Below this it is compared by size instead — without this,
+    /// every image-only PDF would hash to the empty string and match all the
+    /// others.
+    pub min_text_chars: usize,
 }
 
 impl Default for DedupeConfig {
     fn default() -> Self {
-        Self { near_duplicates: true, size_tolerance: 0.05 }
+        Self { near_duplicates: true, size_tolerance: 0.05, min_text_chars: 500 }
     }
 }
 
