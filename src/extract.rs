@@ -116,6 +116,17 @@ fn read_info_lopdf(path: &Path, probe: &mut Probe) {
     probe.pdf_creator = get(b"Creator");
 }
 
+/// Page count alone, without extracting any text.
+pub fn page_count(path: &Path, timeout_secs: u64) -> Option<usize> {
+    if !poppler() {
+        return None;
+    }
+    let out = run(timeout_secs, "pdfinfo", &[&path.to_string_lossy()]).ok()?;
+    out.lines()
+        .find_map(|l| l.strip_prefix("Pages:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 /// Render the first page of a PDF to a PNG, for the vision pass.
 ///
 /// Returns the written file. `pdftoppm -singlefile` names the output exactly,
@@ -133,7 +144,10 @@ pub fn render_first_page(
         .with_context(|| format!("creating {}", out_dir.display()))?;
 
     // Name the render after the source so a re-run overwrites rather than piles up.
-    let stem = blake3::hash(path.to_string_lossy().as_bytes()).to_hex()[..16].to_string();
+    let stem = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()))[..16].to_string()
+    };
     let prefix = out_dir.join(&stem);
     // `-scale-to` fixes the longest edge and preserves the aspect ratio, which
     // matters here: a poster map is far wider than it is tall, and setting the

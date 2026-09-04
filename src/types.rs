@@ -76,7 +76,11 @@ pub struct Assignment {
     pub reason: String,
     /// The catalogue entry behind this filing, carried so `apply` can stamp it
     /// into the PDF without re-reading anything.
-    pub digest: Digest,
+    ///
+    /// Optional so that a plan written before this field existed still loads;
+    /// such a plan can be applied, just not stamped.
+    #[serde(default)]
+    pub digest: Option<Digest>,
 }
 
 /// The full reviewable plan written to disk before anything moves.

@@ -13,6 +13,7 @@ pub struct Config {
     pub extract: ExtractConfig,
     pub model: ModelConfig,
     pub vision: VisionConfig,
+    pub dedupe: DedupeConfig,
     pub taxonomy: TaxonomyConfig,
 }
 
@@ -88,6 +89,27 @@ impl Default for VisionConfig {
     }
 }
 
+/// Catching the same work saved twice.
+///
+/// Exact duplicates are found by fingerprint before anything is read. This
+/// covers the other case: a re-download that differs by a few kilobytes of
+/// metadata and so has a different hash, but is plainly the same document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DedupeConfig {
+    pub near_duplicates: bool,
+    /// How much two files may differ in size and still be the same work,
+    /// as a fraction of the larger. Re-saves observed here differed by
+    /// 0.03% to 1.2%.
+    pub size_tolerance: f32,
+}
+
+impl Default for DedupeConfig {
+    fn default() -> Self {
+        Self { near_duplicates: true, size_tolerance: 0.05 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TaxonomyConfig {
@@ -110,6 +132,7 @@ impl Default for Config {
             extract: ExtractConfig::default(),
             model: ModelConfig::default(),
             vision: VisionConfig::default(),
+            dedupe: DedupeConfig::default(),
             taxonomy: TaxonomyConfig::default(),
         }
     }

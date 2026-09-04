@@ -7,7 +7,7 @@ description = "Context-aware GPU-assisted sorter for a firehose of PDFs"
 
 [dependencies]
 anyhow = "1"
-blake3 = "1"
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 indicatif = { version = "0.17", features = ["rayon"] }

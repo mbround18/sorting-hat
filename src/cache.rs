@@ -58,6 +58,38 @@ impl Cache {
         Ok(())
     }
 
+    /// Move entries that were keyed by an older hashing scheme onto their
+    /// current hash, matching them up by path.
+    ///
+    /// Changing how files are identified would otherwise throw away every
+    /// digest — here, most of an hour of GPU time — for documents that have not
+    /// changed at all. Returns how many entries were carried over.
+    pub fn rekey(&mut self, docs: &[crate::types::SourceDoc]) -> Result<usize> {
+        // Owned keys: the map is consulted while `entries` is being mutated.
+        let by_path: HashMap<std::path::PathBuf, String> = self
+            .entries
+            .values()
+            .map(|d| (d.path.clone(), d.hash.clone()))
+            .collect();
+
+        let mut moved = 0;
+        for doc in docs {
+            if self.entries.contains_key(&doc.hash) {
+                continue;
+            }
+            let Some(old_hash) = by_path.get(&doc.path) else { continue };
+            let Some(mut digest) = self.entries.remove(old_hash) else { continue };
+            digest.hash = doc.hash.clone();
+            self.entries.insert(doc.hash.clone(), digest);
+            moved += 1;
+        }
+
+        if moved > 0 {
+            self.rewrite()?;
+        }
+        Ok(moved)
+    }
+
     /// Drop entries the backend was unsure of, so they can be read again — by a
     /// better backend, typically the vision pass over a document that yielded no
     /// text the first time. Returns how many were dropped.

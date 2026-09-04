@@ -44,11 +44,13 @@ pub fn find_pdfs(root: &Path, exclude: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Hash each file so the cache survives renames and so we can spot duplicates.
+/// Hash every file in full, so identity is exact rather than probable.
 ///
-/// Hashing 14 GB fully would dominate the run, so this fingerprints the head,
-/// tail and length of each file instead — enough to key a cache and to flag
-/// copies of the same download, without reading every byte.
+/// SHA-256 over the whole file, not a sample of it: hashing this corpus takes
+/// about eight seconds with hardware SHA and several cores, which is far too
+/// cheap to justify the risk that two documents differing only in the middle
+/// are declared the same. It is also the hash everyone already has a tool for,
+/// so anything this program reports can be checked with `sha256sum`.
 pub fn fingerprint(paths: &[PathBuf]) -> Vec<SourceDoc> {
     paths
         .par_iter()
@@ -62,28 +64,23 @@ pub fn fingerprint(paths: &[PathBuf]) -> Vec<SourceDoc> {
         .collect()
 }
 
-const SAMPLE: usize = 256 * 1024;
-
 fn fingerprint_one(path: &Path) -> Result<SourceDoc> {
+    use sha2::{Digest, Sha256};
+
     let mut file = std::fs::File::open(path)?;
     let bytes = file.metadata()?.len();
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&bytes.to_le_bytes());
-
-    let mut head = vec![0u8; SAMPLE.min(bytes as usize)];
-    file.read_exact(&mut head)?;
-    hasher.update(&head);
-
-    if bytes > SAMPLE as u64 * 2 {
-        use std::io::Seek;
-        file.seek(std::io::SeekFrom::End(-(SAMPLE as i64)))?;
-        let mut tail = vec![0u8; SAMPLE];
-        file.read_exact(&mut tail)?;
-        hasher.update(&tail);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
     }
 
-    Ok(SourceDoc { path: path.to_path_buf(), hash: hasher.finalize().to_hex().to_string(), bytes })
+    Ok(SourceDoc { path: path.to_path_buf(), hash: format!("{:x}", hasher.finalize()), bytes })
 }
 
 /// Split the corpus into one representative per hash plus the duplicate groups.
@@ -112,4 +109,47 @@ pub fn dedupe(docs: Vec<SourceDoc>) -> (Vec<SourceDoc>, Vec<Duplicate>) {
     unique.sort_by(|a, b| a.path.cmp(&b.path));
     duplicates.sort_by(|a, b| a.kept.cmp(&b.kept));
     (unique, duplicates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the hash to the published SHA-256 of "abc", so a future change to
+    /// how files are read cannot silently produce a different identity — and so
+    /// anything this tool prints stays checkable with `sha256sum`.
+    #[test]
+    fn hashes_match_the_sha256_standard() {
+        let dir = std::env::temp_dir().join(format!("sorting-hat-hash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("abc.bin");
+        std::fs::write(&file, b"abc").unwrap();
+
+        let doc = fingerprint_one(&file).unwrap();
+        assert_eq!(
+            doc.hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(doc.bytes, 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The buffered read must give the same answer as a single-shot hash for a
+    /// file larger than the read buffer.
+    #[test]
+    fn hashes_files_larger_than_the_read_buffer() {
+        use sha2::{Digest, Sha256};
+
+        let dir = std::env::temp_dir().join(format!("sorting-hat-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.bin");
+        let data: Vec<u8> = (0..(3 << 20)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &data).unwrap();
+
+        let doc = fingerprint_one(&file).unwrap();
+        assert_eq!(doc.hash, format!("{:x}", Sha256::digest(&data)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -25,6 +25,12 @@ pub fn apply(plan: &Plan, work_dir: &Path, write_metadata: bool) -> Result<Repor
     // Checked before anything is created, so a refused combination costs nothing.
     if write_metadata {
         metadata::may_write(plan.mode)?;
+        if plan.assignments.iter().all(|a| a.digest.is_none()) {
+            anyhow::bail!(
+                "this plan was made before metadata was recorded; re-run `sorting-hat plan` \
+to produce one that can be stamped"
+            );
+        }
     }
 
     let root = &plan.library_root;
@@ -66,13 +72,13 @@ pub fn apply(plan: &Plan, work_dir: &Path, write_metadata: bool) -> Result<Repor
                 });
                 report.filed += 1;
 
-                if write_metadata {
+                if let (true, Some(digest)) = (write_metadata, &assignment.digest) {
                     // Replace what the PDF already says only when the backend
                     // was confident. Publishers' own metadata is often better
                     // than a hesitant guess, but a confident reading should
                     // displace an authoring-tool default.
-                    let overwrite = assignment.digest.confidence >= OVERWRITE_CONFIDENCE;
-                    match metadata::stamp(&dest, &assignment.digest, overwrite) {
+                    let overwrite = digest.confidence >= OVERWRITE_CONFIDENCE;
+                    match metadata::stamp(&dest, digest, overwrite) {
                         Ok(fields) if !fields.is_empty() => report.stamped += 1,
                         Ok(_) => {}
                         Err(err) => {

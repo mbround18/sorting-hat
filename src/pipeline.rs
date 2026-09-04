@@ -11,7 +11,7 @@ use crate::brain::Brain;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::naming;
-use crate::types::{Assignment, Digest, LinkMode, Plan, Probe, SourceDoc, Taxonomy, Unfiled};
+use crate::types::{Assignment, Digest, Duplicate, LinkMode, Plan, Probe, SourceDoc, Taxonomy, Unfiled};
 use crate::{extract, scan};
 
 /// Where documents go when nothing in the taxonomy fits well enough.
@@ -67,6 +67,13 @@ pub fn build_plan(
     tracing::info!(unique = docs.len(), duplicate_groups = duplicates.len(), "fingerprinted");
 
     let mut cache = Cache::open(&cfg.cache_dir())?;
+    match cache.rekey(&docs) {
+        Ok(moved) if moved > 0 => {
+            tracing::info!(moved, "carried cached digests onto the current hashing scheme")
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(%err, "could not re-key the digest cache"),
+    }
     if opts.rescan {
         cache.clear()?;
     } else {
@@ -83,6 +90,18 @@ pub fn build_plan(
     let (digests, unfiled) = digest_all(cfg, brain, eyes, &mut cache, &docs)?;
     if digests.is_empty() {
         anyhow::bail!("every document failed to produce a digest; nothing to plan");
+    }
+
+    let (digests, near) = if cfg.dedupe.near_duplicates {
+        fold_near_duplicates(cfg, digests)
+    } else {
+        (digests, Vec::new())
+    };
+    let mut duplicates = duplicates;
+    if !near.is_empty() {
+        let folded: usize = near.iter().map(|d| d.others.len()).sum();
+        tracing::info!(titles = near.len(), files = folded, "folded near-duplicate re-saves");
+        duplicates.extend(near);
     }
 
     tracing::info!(docs = digests.len(), "designing taxonomy");
@@ -231,6 +250,94 @@ fn fallback_title(path: &std::path::Path) -> String {
     }
 }
 
+/// Fold together documents that are the same work saved twice.
+///
+/// Exact copies are caught by fingerprint before anything is read. This catches
+/// the re-download: same title, same page count, a few kilobytes apart because
+/// the metadata or compression differs. The largest copy is kept — it is the
+/// least likely to have been through a lossy re-save — and the rest are listed
+/// as duplicates rather than filed alongside as "Title (2)".
+fn fold_near_duplicates(cfg: &Config, digests: Vec<Digest>) -> (Vec<Digest>, Vec<Duplicate>) {
+    let mut groups: HashMap<String, Vec<Digest>> = HashMap::new();
+    for digest in digests {
+        groups.entry(title_key(&digest.title)).or_default().push(digest);
+    }
+
+    // Page counts are only needed for titles that actually collide.
+    let contested: Vec<PathBuf> = groups
+        .values()
+        .filter(|g| g.len() > 1)
+        .flat_map(|g| g.iter().map(|d| d.path.clone()))
+        .collect();
+    let pages: HashMap<PathBuf, Option<usize>> = contested
+        .par_iter()
+        .map(|path| (path.clone(), extract::page_count(path, cfg.extract.timeout_secs)))
+        .collect();
+
+    let size = |path: &PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let mut kept = Vec::new();
+    let mut duplicates = Vec::new();
+
+    for (_, mut group) in groups {
+        if group.len() == 1 {
+            kept.append(&mut group);
+            continue;
+        }
+        // Largest first: that copy becomes the candidate every other is judged against.
+        group.sort_by_key(|d| std::cmp::Reverse(size(&d.path)));
+
+        while !group.is_empty() {
+            let winner = group.remove(0);
+            let winner_size = size(&winner.path);
+            let winner_pages = pages.get(&winner.path).copied().flatten();
+
+            let mut same = Vec::new();
+            group.retain(|other| {
+                let other_pages = pages.get(&other.path).copied().flatten();
+                // A different page count means a different edition or printing,
+                // not a re-save; keep both and let the user see them.
+                if winner_pages != other_pages {
+                    return true;
+                }
+                let other_size = size(&other.path);
+                let spread = winner_size.abs_diff(other_size) as f32 / winner_size.max(1) as f32;
+                if spread <= cfg.dedupe.size_tolerance {
+                    same.push(other.path.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+
+            if !same.is_empty() {
+                duplicates.push(Duplicate {
+                    hash: winner.hash.clone(),
+                    kept: winner.path.clone(),
+                    others: same,
+                });
+            }
+            kept.push(winner);
+        }
+    }
+
+    kept.sort_by(|a, b| a.path.cmp(&b.path));
+    duplicates.sort_by(|a, b| a.kept.cmp(&b.kept));
+    (kept, duplicates)
+}
+
+/// A title reduced to what identifies the work, for grouping re-saves.
+fn title_key(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Render the first page and have the vision backend read it.
 fn look(
     cfg: &Config,
@@ -350,7 +457,7 @@ fn to_assignments(digests: &[Digest], filings: &[(String, f32, String)]) -> Vec<
             title: digest.title.clone(),
             confidence: *confidence,
             reason: reason.clone(),
-            digest: digest.clone(),
+            digest: Some(digest.clone()),
         });
     }
 
@@ -398,6 +505,13 @@ mod tests {
         // The original name is preserved verbatim, punctuation and all.
         assert_eq!(fallback_title(std::path::Path::new("/a/PZO30102E.pdf")), "PZO30102E");
         assert_eq!(fallback_title(std::path::Path::new("/a/some_map.name.pdf")), "some_map.name");
+    }
+
+    #[test]
+    fn title_key_ignores_punctuation_and_case() {
+        assert_eq!(title_key("Ghosts of Saltmarsh"), title_key("ghosts  of saltmarsh"));
+        assert_eq!(title_key("Skull & Shackles: Part 6"), "skull shackles part 6");
+        assert_ne!(title_key("Volo's Guide"), title_key("Xanathar's Guide"));
     }
 
     #[test]

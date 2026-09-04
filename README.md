@@ -11,7 +11,7 @@ D&D-specific except a keyword table in the fallback backend.
 
 Three passes, because the interesting part is the second one.
 
-1. **Read.** Every PDF is fingerprinted, deduplicated, and probed — embedded
+1. **Read.** Every PDF is hashed, deduplicated, and probed — embedded
    metadata plus the text of its opening pages. The model turns that into a
    catalogue entry: title, game system, document type, setting, level range,
    topics, and how sure it is.
@@ -47,6 +47,26 @@ costs no extra disk and the originals are never touched. `--mode symlink`,
 
 Digests are cached by content fingerprint, so a second run only reads documents
 that are new — and renaming a source file doesn't invalidate its entry.
+
+## Duplicates
+
+Two different problems, and each needs its own answer.
+
+**Identical files** are found by SHA-256 over the whole file. Hashing 14 GB
+takes about eight seconds on a machine with hardware SHA, so there is no reason
+to hash anything less than all of it. The hashes are the ordinary ones — check
+any of them with `sha256sum`.
+
+**The same work saved twice** is the harder case, and no hash will ever find it.
+A re-download differs from the original by a few kilobytes of metadata or
+compression, so its hash is completely different. In the test corpus that was
+109 titles — 218 files, 2.70 GB — against a single exact duplicate. They are
+matched instead on title, page count, and file size within a tolerance: a
+different page count means a different edition, so both are kept. The largest
+copy is filed and the rest are listed under `duplicates` in the plan. Nothing is
+ever deleted.
+
+Turn the second one off with `[dedupe] near_duplicates = false`.
 
 ## Writing the naming back into the PDF
 
