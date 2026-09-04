@@ -51,3 +51,19 @@ max_pixels = 2100
 # Qwen2.5-VL-7B: 2048 is safe, 3072 aborts llama.cpp outright. Raising this without
 # this can overrun the vision encoder's buffers and abort llama.cpp outright.
 image_max_tokens = 2048
+
+[dedupe]
+# Exact duplicates are always found by SHA-256. This is the other case: the same
+# work re-saved, differing by a few kilobytes, which no hash can match.
+near_duplicates = true
+# How much two files may differ in size and still be the same work. Re-saves in
+# this collection differed by 0.03% to 1.2%.
+size_tolerance = 0.05
+
+[systems.aliases]
+# Folds spellings of one system together, so it cannot compete with itself for a
+# folder. Keys are lower-case. These override the built-in table — set
+# "d&d" = "D&D 3.5e" for a collection that is mostly older editions.
+# A system not listed anywhere keeps its own name and gets its own folder.
+"d&d" = "D&D 5e"
+"pathfinder" = "Pathfinder 1e"

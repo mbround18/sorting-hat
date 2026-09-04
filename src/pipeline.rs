@@ -11,6 +11,7 @@ use crate::brain::Brain;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::naming;
+use crate::systems;
 use crate::types::{Assignment, Digest, Duplicate, LinkMode, Plan, Probe, SourceDoc, Taxonomy, Unfiled};
 use crate::{extract, scan};
 
@@ -92,6 +93,13 @@ pub fn build_plan(
         anyhow::bail!("every document failed to produce a digest; nothing to plan");
     }
 
+    // Fold system spellings together before anything is designed around them,
+    // so one system cannot compete with itself for a folder.
+    let mut digests = digests;
+    for digest in &mut digests {
+        digest.game_system = systems::canonical(&digest.game_system, &cfg.systems.aliases);
+    }
+
     let (digests, near) = if cfg.dedupe.near_duplicates {
         fold_near_duplicates(cfg, digests)
     } else {
@@ -106,6 +114,7 @@ pub fn build_plan(
 
     tracing::info!(docs = digests.len(), "designing taxonomy");
     let taxonomy = brain.design_taxonomy(&digests, &cfg.taxonomy)?;
+    let taxonomy = ensure_every_system_has_a_home(taxonomy, &digests);
     tracing::info!(leaves = taxonomy.leaves.len(), "taxonomy designed");
 
     let filings = file_all(cfg, brain, &taxonomy, &digests);
@@ -248,6 +257,33 @@ fn fallback_title(path: &std::path::Path) -> String {
     } else {
         stem
     }
+}
+
+/// Add a folder for any system the designed tree left out.
+///
+/// The model is asked to put the game system at the top level, but a system
+/// with only a document or two is easy for it to overlook — Cyberpunk Red, two
+/// files in four hundred, was landing under "System Neutral" because no
+/// Cyberpunk folder existed to file it into. Whether a system gets a home is
+/// not something to leave to a prompt, so it is guaranteed here instead.
+fn ensure_every_system_has_a_home(mut taxonomy: Taxonomy, digests: &[Digest]) -> Taxonomy {
+    let mut present: Vec<&str> = digests.iter().map(|d| d.game_system.as_str()).collect();
+    present.sort_unstable();
+    present.dedup();
+
+    for system in present {
+        let covered = taxonomy.leaves.iter().any(|leaf| {
+            leaf.split('/').next().is_some_and(|top| top.eq_ignore_ascii_case(system))
+        });
+        if !covered {
+            tracing::info!(system, "adding a folder the designed taxonomy left out");
+            taxonomy.leaves.push(system.to_string());
+        }
+    }
+
+    taxonomy.leaves.sort();
+    taxonomy.leaves.dedup();
+    taxonomy
 }
 
 /// Fold together documents that are the same work saved twice.
@@ -505,6 +541,42 @@ mod tests {
         // The original name is preserved verbatim, punctuation and all.
         assert_eq!(fallback_title(std::path::Path::new("/a/PZO30102E.pdf")), "PZO30102E");
         assert_eq!(fallback_title(std::path::Path::new("/a/some_map.name.pdf")), "some_map.name");
+    }
+
+    fn digest_for(system: &str) -> Digest {
+        Digest {
+            hash: system.into(),
+            path: format!("{system}.pdf").into(),
+            title: "T".into(),
+            game_system: system.into(),
+            doc_type: "other".into(),
+            setting: "unknown".into(),
+            level_range: "unknown".into(),
+            publisher: "unknown".into(),
+            topics: vec![],
+            summary: String::new(),
+            confidence: 1.0,
+            source: "test".into(),
+        }
+    }
+
+    #[test]
+    fn a_system_the_taxonomy_forgot_still_gets_a_folder() {
+        let tax = Taxonomy { leaves: vec!["D&D 5e/Adventures".into()], notes: vec![] };
+        let digests = vec![digest_for("D&D 5e"), digest_for("Cyberpunk Red")];
+        let tax = ensure_every_system_has_a_home(tax, &digests);
+        assert!(tax.leaves.contains(&"Cyberpunk Red".to_string()));
+        assert!(tax.leaves.contains(&"D&D 5e/Adventures".to_string()));
+    }
+
+    #[test]
+    fn a_system_already_covered_gains_no_duplicate_folder() {
+        let tax = Taxonomy {
+            leaves: vec!["Cyberpunk Red/Core Rules".into()],
+            notes: vec![],
+        };
+        let tax = ensure_every_system_has_a_home(tax, &[digest_for("Cyberpunk Red")]);
+        assert_eq!(tax.leaves, vec!["Cyberpunk Red/Core Rules".to_string()]);
     }
 
     #[test]

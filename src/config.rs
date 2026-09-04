@@ -14,6 +14,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub vision: VisionConfig,
     pub dedupe: DedupeConfig,
+    pub systems: SystemsConfig,
     pub taxonomy: TaxonomyConfig,
 }
 
@@ -89,6 +90,15 @@ impl Default for VisionConfig {
     }
 }
 
+/// Game-system naming.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SystemsConfig {
+    /// Extra or replacement aliases, lower-cased on the left. Overrides the
+    /// built-in table, so `"d&d" = "D&D 3.5e"` suits an older collection.
+    pub aliases: std::collections::HashMap<String, String>,
+}
+
 /// Catching the same work saved twice.
 ///
 /// Exact duplicates are found by fingerprint before anything is read. This
@@ -133,6 +143,7 @@ impl Default for Config {
             model: ModelConfig::default(),
             vision: VisionConfig::default(),
             dedupe: DedupeConfig::default(),
+            systems: SystemsConfig::default(),
             taxonomy: TaxonomyConfig::default(),
         }
     }

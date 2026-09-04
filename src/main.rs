@@ -11,6 +11,7 @@ mod naming;
 mod pipeline;
 mod report;
 mod scan;
+mod systems;
 mod types;
 
 use anyhow::{Context, Result};
