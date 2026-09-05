@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest something the tool should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The situation, rather than the feature. What does your collection look
+        like, and what about it does the tool handle badly?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you have tried
+      description: >
+        Existing flags, config settings, or another tool. `sorting-hat --help`
+        and `sorting-hat.toml` between them cover more than is obvious.
+
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Does this fit how the tool works
+      description: >
+        Not a barrier — say so if your idea needs one of these relaxed and why.
+      options:
+        - label: It would not delete or overwrite anything the user did not ask it to
+        - label: It would not write into the source tree
+        - label: A wrong answer from the model would be visible rather than silent

@@ -1,0 +1,80 @@
+name: Bug report
+description: Something behaved differently than it should have
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The most useful bugs in this project have come
+        with a description of what the *document* was like — that detail is
+        usually the whole story.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, and what it did.
+      placeholder: |
+        $ sorting-hat bookmarks --refine
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `sorting-hat doctor`
+      description: >
+        This reports the external tools, models, GPU and paths. Most setup
+        problems are visible here and nowhere else.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Which backend
+      options:
+        - llama (local model)
+        - heuristic (no model)
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: document
+    attributes:
+      label: What were the documents like
+      description: >
+        If one document triggers it, what kind is it? Encrypted, image-only or
+        scanned, very large, unusual typography such as small caps, already has
+        bookmarks, produced by an unusual tool (`pdfinfo` shows Producer)?
+        Please do not attach copyrighted files.
+      placeholder: |
+        ~200 page rulebook, image-only, pdfinfo says "Optimized: yes"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: >
+        Run again with `--log debug` if you can. Warnings matter here — several
+        failure modes in this program are reported only as a warning and then
+        silently fall back.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "sorting-hat --version, or the commit you built"
+    validations:
+      required: true

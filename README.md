@@ -160,3 +160,26 @@ See `build-notes.md` for the toolchain pins this machine needs.
     src/pipeline.rs  stage orchestration, taxonomy folding, path assignment
     src/naming.rs    turning model output into paths that survive a file system
     src/apply.rs     execution and undo
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). It is worth skimming before changing
+anything: most of this program's opinions were beaten into it by real files, and
+most of its failure modes are silent — they look exactly like success until you
+check the output. The tests are named after the symptoms that caused them.
+
+Please also read the [Code of Conduct](CODE_OF_CONDUCT.md), and report security
+problems through the [security policy](SECURITY.md) rather than a public issue.
+
+## Licence
+
+Dual-licensed under either of
+
+- Apache Licence, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT licence ([LICENSE-MIT](LICENSE-MIT))
+
+at your option, which is the usual arrangement in the Rust ecosystem.
+
+Unless you state otherwise, any contribution you intentionally submit for
+inclusion in this work shall be dual-licensed as above, without any additional
+terms or conditions.

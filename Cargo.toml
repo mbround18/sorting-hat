@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 description = "Context-aware GPU-assisted sorter for a firehose of PDFs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mbround18/sorting-hat"
+readme = "README.md"
+keywords = ["pdf", "llm", "organiser", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

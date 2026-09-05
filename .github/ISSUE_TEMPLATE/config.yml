@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and build problems
+    url: https://github.com/mbround18/sorting-hat/blob/main/build-notes.md
+    about: >
+      libclang, cudart_static and the CUDA host compiler each need a specific
+      pin. Try `sorting-hat doctor` first.
+  - name: Security vulnerability
+    url: https://github.com/mbround18/sorting-hat/security/advisories/new
+    about: Report privately rather than in a public issue.
