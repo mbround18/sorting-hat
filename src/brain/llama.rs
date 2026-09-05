@@ -219,17 +219,25 @@ fn heading_batch_size(context: u32) -> usize {
     const PER_CANDIDATE: usize = HEADING_PROMPT_TOKENS + HEADING_REPLY_TOKENS;
     // Solved rather than clamped: a floor of twenty candidates is meaningless
     // if twenty do not fit, and clamping upwards is how the overflow got in.
-    let usable = (context as usize).saturating_sub(HEADING_OVERHEAD_TOKENS + REPLY_SLACK);
+    let usable = (context as usize)
+        .saturating_sub(HEADING_OVERHEAD_TOKENS + REPLY_SLACK + SAFETY_MARGIN);
     (usable / PER_CANDIDATE).clamp(1, 200)
 }
 
 /// Fixed part of the reply budget, on top of the per-candidate cost.
 const REPLY_SLACK: usize = 64;
+/// Every figure here is an estimate of how a tokeniser will behave, so filling
+/// the window exactly is not filling it safely.
+const SAFETY_MARGIN: usize = 128;
 
 /// Tokens one candidate line costs in the prompt.
 const HEADING_PROMPT_TOKENS: usize = 17;
 /// Tokens one kept candidate costs in the reply.
-const HEADING_REPLY_TOKENS: usize = 12;
+///
+/// `{"i":123,"l":1},` is about eleven; the allowance is deliberately generous
+/// because running out mid-array yields unparseable JSON and the entire answer
+/// is discarded, not merely shortened.
+const HEADING_REPLY_TOKENS: usize = 16;
 /// Instructions, chat template and slack.
 const HEADING_OVERHEAD_TOKENS: usize = 600;
 

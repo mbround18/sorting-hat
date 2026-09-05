@@ -319,11 +319,15 @@ pub fn headings_user(lines: &[(usize, String, usize)]) -> String {
 pub fn headings_grammar(max_index: usize, max_level: usize) -> String {
     let digits = max_index.to_string().len().max(1);
     let level = max_level.saturating_sub(1).min(9);
+    // Deliberately no whitespace anywhere. Allowing it lets the model
+    // pretty-print, and indenting a few hundred entries costs more tokens than
+    // the entries themselves — enough to run out of budget mid-array, at which
+    // point the reply is unparseable JSON and the whole answer is thrown away.
     format!(
-        r#"root ::= "[" ws (item (ws "," ws item)*)? ws "]"
-item ::= "{{" ws "\"i\":" ws index ws "," ws "\"l\":" ws [0-{level}] ws "}}"
+        r#"root ::= "[" (item ("," item)*)? "]"
+item ::= "{{\"i\":" index ",\"l\":" [0-{level}] "}}"
 index ::= [0-9]{{1,{digits}}}
-{PRIMITIVES}"#
+"#
     )
 }
 
@@ -335,9 +339,19 @@ mod grammar_shape {
     #[test]
     fn json_keys_keep_their_escaped_quotes() {
         let g = super::headings_grammar(283, 3);
-        assert!(g.contains(r#""\"i\":""#), "lost escapes in:\n{g}");
-        assert!(g.contains(r#""\"l\":""#), "lost escapes in:\n{g}");
-        assert!(!g.contains(r#"""i":""#), "unescaped key in:\n{g}");
+        assert!(g.contains(r#"\"i\":"#), "lost escapes in:\n{g}");
+        assert!(g.contains(r#"\"l\":"#), "lost escapes in:\n{g}");
+        assert!(!g.contains(r#"{"i":"#), "unescaped key in:\n{g}");
+    }
+
+    /// Whitespace in this grammar is a token budget leak, not a style choice.
+    #[test]
+    fn the_reply_grammar_permits_no_pretty_printing() {
+        let g = super::headings_grammar(283, 3);
+        let root = g.lines().find(|l| l.starts_with("root ::=")).unwrap();
+        assert!(!root.contains("ws"), "whitespace allowed in: {root}");
+        let item = g.lines().find(|l| l.starts_with("item ::=")).unwrap();
+        assert!(!item.contains("ws"), "whitespace allowed in: {item}");
     }
 
     #[test]
