@@ -1,7 +1,10 @@
 # sorting-hat configuration. Every value here can be overridden on the command
-# line; see `sorting-hat --help`.
+# line; see `sorting-hat --help`, and `sorting-hat doctor` to check the machine.
+#
+# Point `source` at the directory to read, and `library` at where the sorted
+# copy should be built. Neither is written to until you run `apply`.
 
-source  = "/home/mbruno/Nextcloud/DungeonsAndDragons/PDFs"
+source  = "./pdfs"
 work_dir = "tmp"
 library = "tmp/library"
 
