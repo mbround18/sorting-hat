@@ -23,10 +23,12 @@ pub struct Report {
     pub index_skipped: Vec<(PathBuf, String)>,
 }
 
-/// What each filed document should be enriched with, keyed by destination.
+/// What each filed document should be enriched with.
+///
+/// Whether metadata is written is passed separately, because it is also the
+/// flag that gates the link-mode check; this carries the work itself.
 #[derive(Default)]
 pub struct Enrichment {
-    pub metadata: bool,
     /// Bookmark entries per source path, prepared before anything is written.
     pub outlines: std::collections::HashMap<PathBuf, Vec<outline::Entry>>,
     pub max_growth: f32,

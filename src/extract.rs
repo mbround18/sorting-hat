@@ -121,8 +121,6 @@ fn read_info_lopdf(path: &Path, probe: &mut Probe) {
 /// it — an image-only PDF would otherwise hash to the empty string and match
 /// every other image-only PDF in the collection.
 pub fn content_key(path: &Path, min_chars: usize, timeout_secs: u64) -> Option<String> {
-    use sha2::{Digest, Sha256};
-
     if !poppler() {
         return None;
     }

@@ -73,28 +73,6 @@ fn entries(digest: &Digest) -> Vec<(&'static str, String)> {
     out
 }
 
-/// Write the digest into `path`'s Info dictionary.
-///
-/// `overwrite` decides what happens to values the PDF already carries. Left
-/// off, existing metadata wins — the safe choice when we are unsure. Turned on,
-/// ours wins, which is the point of the exercise for a file whose embedded
-/// title is an authoring-tool default like "Diapositiva 1".
-///
-/// Returns the field names actually written.
-pub fn stamp(path: &Path, digest: &Digest, overwrite: bool) -> Result<Vec<&'static str>> {
-    let mut doc = Document::load(path)
-        .with_context(|| format!("reading {} for metadata", path.display()))?;
-    if doc.is_encrypted() {
-        return Err(anyhow!("PDF is encrypted; leaving its metadata alone"));
-    }
-    let written = apply_to_doc(&mut doc, digest, overwrite);
-    if written.is_empty() {
-        return Ok(written);
-    }
-    save_atomically(&mut doc, path)?;
-    Ok(written)
-}
-
 /// Set the Info dictionary on an already-loaded document.
 ///
 /// Separate from [`stamp`] so that metadata and a bookmark tree can be written

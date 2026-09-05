@@ -29,17 +29,18 @@ a 400th category.
 
 ## Use
 
-    # read everything and propose a library — changes nothing on disk
-    sorting-hat plan --config sorting-hat.toml
+    sorting-hat doctor          # check this machine has what it needs
+    sorting-hat sort            # read, plan and file, with one confirmation
 
-    # look at what it wants to do, in detail
-    sorting-hat show --full
+Or step by step, which is the way to work the first time:
 
-    # do it
-    sorting-hat apply
+    sorting-hat plan            # propose a library; changes nothing on disk
+    sorting-hat show --full     # every document and its new name
+    sorting-hat apply           # carry it out
+    sorting-hat undo            # change your mind
 
-    # change your mind
-    sorting-hat undo
+`plan` only ever reads. `apply --dry-run` says what it would do and writes
+nothing. Every `apply` leaves an undo manifest.
 
 Default mode is `--mode hardlink`: the library is built out of hard links, so it
 costs no extra disk and the originals are never touched. `--mode symlink`,

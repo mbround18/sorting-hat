@@ -26,7 +26,25 @@ use brain::Brain;
 use types::{LinkMode, Plan};
 
 #[derive(Parser)]
-#[command(name = "sorting-hat", version, about, long_about = None)]
+#[command(
+    name = "sorting-hat",
+    version,
+    about,
+    long_about = "Reads a directory of PDFs, works out what each one is using a local model on \
+the GPU, and proposes a library worth living in. Nothing moves until you have read the plan.",
+    after_help = "\
+EXAMPLES
+  sorting-hat sort -s ~/PDFs -l ~/Library     read, plan and file in one go
+  sorting-hat plan -s ~/PDFs                  propose a library, change nothing
+  sorting-hat show --full                     read the plan in detail
+  sorting-hat apply                           carry it out
+  sorting-hat apply --copy --metadata         copy, and write the naming into each PDF
+  sorting-hat undo                            put everything back
+  sorting-hat doctor                          check this machine is set up
+
+Start with `plan`. It only reads.",
+    subcommand_help_heading = "Commands",
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,30 +56,31 @@ struct Cli {
 #[derive(Args, Clone)]
 struct Common {
     /// TOML config file. Command line flags win over it.
-    #[arg(long, short, global = true)]
+    #[arg(long, short, global = true, help_heading = "Paths", value_name = "FILE")]
     config: Option<PathBuf>,
 
     /// Directory to read PDFs from, recursively.
-    #[arg(long, short, global = true)]
+    #[arg(long, short, global = true, help_heading = "Paths", value_name = "DIR")]
     source: Option<PathBuf>,
 
     /// Where the sorted library is built.
-    #[arg(long, short, global = true)]
+    #[arg(long, short, global = true, help_heading = "Paths", value_name = "DIR")]
     library: Option<PathBuf>,
 
     /// Scratch directory for the cache, plan and undo manifests.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Paths", value_name = "DIR")]
     work_dir: Option<PathBuf>,
 
     /// GGUF model file for the llama backend.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Model", value_name = "FILE")]
     model: Option<PathBuf>,
 
     /// Which understanding backend to use.
-    #[arg(long, global = true, value_enum, default_value_t = Backend::Auto)]
+    #[arg(long, global = true, value_enum, default_value_t = Backend::Auto, help_heading = "Model")]
     backend: Backend,
 
-    #[arg(long, global = true, default_value = "info")]
+    /// Log level: error, warn, info, debug, trace.
+    #[arg(long, global = true, default_value = "info", help_heading = "Model", value_name = "LEVEL")]
     log: String,
 }
 
@@ -102,19 +121,50 @@ enum Command {
         limit: Option<usize>,
     },
 
-    /// Print an existing plan.
+    /// Read, plan and file in one go.
+    ///
+    /// The same work as `plan` followed by `apply`, with one confirmation in
+    /// between. Use `plan` on its own when you want to study the proposal, or
+    /// need --rescan and the other read-time options.
+    Sort {
+        /// How filed documents get into the library.
+        #[arg(long, value_enum, default_value_t = LinkMode::Hardlink)]
+        mode: LinkMode,
+
+        /// Skip the confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Write the title, author and keywords into each PDF. Needs
+        /// --mode copy or --mode move.
+        #[arg(long)]
+        metadata: bool,
+
+        /// Give documents without one a chapter index. Needs
+        /// --mode copy or --mode move.
+        #[arg(long)]
+        bookmarks: bool,
+
+        /// Have the model judge which headings are real chapters.
+        #[arg(long, requires = "bookmarks")]
+        refine: bool,
+    },
+
+    /// Read a plan that has already been made.
     Show {
-        /// List every document, not just folder counts.
+        /// List every document and its new name, not just folder counts.
         #[arg(long)]
         full: bool,
 
-        #[arg(long)]
+        /// Plan file to read. Defaults to the one in the work directory.
+        #[arg(long, value_name = "FILE")]
         plan: Option<PathBuf>,
     },
 
     /// Carry out a plan.
     Apply {
-        #[arg(long)]
+        /// Plan file to carry out. Defaults to the one in the work directory.
+        #[arg(long, value_name = "FILE")]
         plan: Option<PathBuf>,
 
         /// Skip the confirmation prompt.
@@ -131,12 +181,12 @@ enum Command {
         /// naming travels with the file. Needs a plan made with --mode copy or
         /// --mode move: a hard link or symlink is the same file as the
         /// original, and stamping one would rewrite your source PDFs.
-        #[arg(long)]
+        #[arg(long = "metadata", alias = "write-metadata")]
         write_metadata: bool,
 
         /// Build a chapter index (PDF bookmarks) for documents that have none,
         /// in the same rewrite as the metadata. Same mode requirement.
-        #[arg(long)]
+        #[arg(long = "bookmarks", alias = "write-bookmarks")]
         write_bookmarks: bool,
 
         /// Have the model judge which headings are real chapters. Without it,
@@ -144,13 +194,19 @@ enum Command {
         /// titles and stat-block names that are not really chapters.
         #[arg(long, requires = "write_bookmarks")]
         refine: bool,
+
+        /// Say what would happen, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
-    /// Build a chapter index (PDF bookmarks) for documents that have none.
+    /// Add a chapter index to an already-built library.
     ///
-    /// Only ever touches the library, never the source tree. Documents that
-    /// cannot be rewritten — encrypted, damaged, or that would balloon in size —
-    /// are skipped and reported rather than risked.
+    /// Prefer `apply --bookmarks`, which reads the headings from the pristine
+    /// sources and writes them in the same pass as everything else. This
+    /// command rewrites files this tool has already rewritten, and lopdf cannot
+    /// reliably re-read its own output — expect roughly a third to be skipped.
+    #[command(hide = true)]
     Bookmark {
         /// Have the model judge which headings are real. Without it, type size
         /// alone decides: instant and free, but it keeps sidebar titles and
@@ -175,8 +231,11 @@ enum Command {
         limit: Option<usize>,
     },
 
-    /// Report whether each file can be parsed for rewriting.
-    Loadable { files: Vec<PathBuf> },
+    /// Check this machine has what the tool needs.
+    ///
+    /// Reports the external tools, the models and the GPU, and says what is
+    /// missing and what that costs you.
+    Doctor,
 
     /// Show the chapter headings the font pass finds in one PDF.
     Headings {
@@ -211,31 +270,43 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Plan { mode, rescan, limit, redigest_below, redigest_unknown } => {
-            let mut brain = select_backend(&cli.common, &cfg)?;
-            tracing::info!(backend = brain.name(), "starting");
-
-            let mut eyes = select_eyes(&cli.common, &cfg);
-            if let Some(eyes) = &eyes {
-                tracing::info!(vision = eyes.name(), "vision pass enabled for text-poor PDFs");
-            }
-
             let opts = pipeline::Options { mode, rescan, limit, redigest_below, redigest_unknown };
-            let plan = pipeline::build_plan(
-                &cfg,
-                brain.as_mut(),
-                eyes.as_deref_mut(),
-                &opts,
-            )?;
-
-            std::fs::create_dir_all(&cfg.work_dir)?;
-            let path = cfg.plan_path();
-            std::fs::write(&path, serde_json::to_vec_pretty(&plan)?)
-                .with_context(|| format!("writing {}", path.display()))?;
-
+            let plan = run_plan(&cfg, &cli.common, &opts)?;
             println!("\n{}", report::tree(&plan, false));
             println!("{}", report::summary(&plan));
-            println!("  plan       {}\n", path.display());
+            println!("  plan       {}\n", cfg.plan_path().display());
             println!("Review it, then run: sorting-hat apply");
+        }
+
+        Command::Sort { mode, yes, metadata, bookmarks, refine } => {
+            let opts = pipeline::Options {
+                mode,
+                rescan: false,
+                limit: None,
+                redigest_below: None,
+                redigest_unknown: false,
+            };
+            let plan = run_plan(&cfg, &cli.common, &opts)?;
+            println!("\n{}", report::tree(&plan, false));
+            println!("{}", report::summary(&plan));
+
+            if metadata || bookmarks {
+                metadata::may_write(plan.mode)?;
+            }
+            if !yes && !confirm("File these documents?")? {
+                println!("Nothing done. The plan is saved; run `sorting-hat apply` when ready.");
+                return Ok(());
+            }
+
+            let mut enrich = apply::Enrichment {
+                outlines: Default::default(),
+                max_growth: cfg.bookmarks.max_growth,
+            };
+            if bookmarks {
+                enrich.outlines = prepare_outlines(&cfg, &plan, refine, &cli.common)?;
+            }
+            let outcome = apply::apply(&plan, &cfg.work_dir, metadata, &enrich)?;
+            report_apply(&outcome, metadata, bookmarks);
         }
 
         Command::Show { full, plan } => {
@@ -250,7 +321,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Apply { plan, yes, mode, write_metadata, write_bookmarks, refine } => {
+        Command::Apply { plan, yes, mode, write_metadata, write_bookmarks, refine, dry_run } => {
             let path = plan.unwrap_or_else(|| cfg.plan_path());
             let mut plan = load_plan(path)?;
             if let Some(mode) = mode {
@@ -276,13 +347,18 @@ fn main() -> Result<()> {
                 println!("  This MOVES the originals out of {}.\n", plan.source_root.display());
             }
 
+            if dry_run {
+                println!("Dry run: nothing was written.");
+                println!("Drop --dry-run to carry this out.");
+                return Ok(());
+            }
+
             if !yes && !confirm("Apply this plan?")? {
                 println!("Nothing done.");
                 return Ok(());
             }
 
             let mut enrich = apply::Enrichment {
-                metadata: write_metadata,
                 outlines: Default::default(),
                 max_growth: cfg.bookmarks.max_growth,
             };
@@ -294,34 +370,7 @@ fn main() -> Result<()> {
             }
 
             let outcome = apply::apply(&plan, &cfg.work_dir, write_metadata, &enrich)?;
-            println!(
-                "\nfiled {}, already present {}, failed {}",
-                outcome.filed,
-                outcome.skipped,
-                outcome.failed.len()
-            );
-            for (path, err) in &outcome.failed {
-                println!("  {} — {err}", path.display());
-            }
-            if write_metadata {
-                println!("stamped {} PDFs, {} could not be stamped", outcome.stamped, outcome.stamp_failed.len());
-                for (path, err) in outcome.stamp_failed.iter().take(10) {
-                    println!("  {} — {err}", path.display());
-                }
-                if outcome.stamp_failed.len() > 10 {
-                    println!("  ... and {} more", outcome.stamp_failed.len() - 10);
-                }
-            }
-            if write_bookmarks {
-                println!(
-                    "indexed {} documents with {} bookmarks",
-                    outcome.indexed, outcome.bookmarks
-                );
-                summarise_skips(&outcome.index_skipped);
-            }
-            if let Some(manifest) = &outcome.manifest {
-                println!("\nundo with: sorting-hat undo {}", manifest.display());
-            }
+            report_apply(&outcome, write_metadata, write_bookmarks);
         }
 
         Command::Bookmark { refine, force, min_pages, dry_run, limit } => {
@@ -335,19 +384,7 @@ fn main() -> Result<()> {
             bookmark_library(&cfg, brain.as_deref_mut(), refine, force, min_pages, dry_run, limit)?;
         }
 
-        Command::Loadable { files } => {
-            let (mut ok, mut bad) = (0usize, 0usize);
-            for f in &files {
-                match lopdf::Document::load(f) {
-                    Ok(_) => ok += 1,
-                    Err(err) => {
-                        bad += 1;
-                        println!("FAIL {err}  {}", f.display());
-                    }
-                }
-            }
-            println!("loadable={ok} failed={bad}");
-        }
+        Command::Doctor => doctor(&cfg)?,
 
         Command::Headings { file, min_ratio, max_depth } => {
             outline::dump(&file, min_ratio, max_depth, cfg.extract.timeout_secs)?;
@@ -684,6 +721,158 @@ fn summarise_skips(skipped: &[(PathBuf, String)]) {
     for (why, count) in &reasons {
         println!("    {count} — {why}");
     }
+}
+
+/// Read the source tree, build a plan, and save it.
+fn run_plan(
+    cfg: &config::Config,
+    common: &Common,
+    opts: &pipeline::Options,
+) -> Result<Plan> {
+    let mut brain = select_backend(common, cfg)?;
+    tracing::info!(backend = brain.name(), "starting");
+
+    let mut eyes = select_eyes(common, cfg);
+    if let Some(eyes) = &eyes {
+        tracing::info!(vision = eyes.name(), "vision pass enabled for text-poor PDFs");
+    }
+
+    let plan = pipeline::build_plan(cfg, brain.as_mut(), eyes.as_deref_mut(), opts)?;
+
+    std::fs::create_dir_all(&cfg.work_dir)?;
+    let path = cfg.plan_path();
+    std::fs::write(&path, serde_json::to_vec_pretty(&plan)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(plan)
+}
+
+/// Print what an apply actually did.
+fn report_apply(outcome: &apply::Report, metadata: bool, bookmarks: bool) {
+    println!(
+        "\nfiled {}, already present {}, failed {}",
+        outcome.filed,
+        outcome.skipped,
+        outcome.failed.len()
+    );
+    for (path, err) in outcome.failed.iter().take(10) {
+        println!("  {} — {err}", path.display());
+    }
+    if outcome.failed.len() > 10 {
+        println!("  ... and {} more", outcome.failed.len() - 10);
+    }
+    if metadata {
+        println!(
+            "stamped {} PDFs, {} could not be stamped",
+            outcome.stamped,
+            outcome.stamp_failed.len()
+        );
+        for (path, err) in outcome.stamp_failed.iter().take(10) {
+            println!("  {} — {err}", path.display());
+        }
+        if outcome.stamp_failed.len() > 10 {
+            println!("  ... and {} more", outcome.stamp_failed.len() - 10);
+        }
+    }
+    if bookmarks {
+        println!(
+            "indexed {} documents with {} bookmarks",
+            outcome.indexed, outcome.bookmarks
+        );
+        summarise_skips(&outcome.index_skipped);
+    }
+    if let Some(manifest) = &outcome.manifest {
+        println!("\nundo with: sorting-hat undo {}", manifest.display());
+    }
+}
+
+/// Report what is present, what is missing, and what missing costs.
+fn doctor(cfg: &config::Config) -> Result<()> {
+    fn found(label: &str, ok: bool, detail: &str) {
+        println!("  [{}] {label:<26} {detail}", if ok { "ok" } else { "--" });
+    }
+    fn have(bin: &str) -> bool {
+        std::process::Command::new(bin).arg("-v").output().is_ok()
+    }
+
+    println!("\nExternal tools");
+    let poppler = ["pdftotext", "pdfinfo", "pdftoppm", "pdftohtml"];
+    for bin in poppler {
+        let ok = have(bin);
+        found(
+            bin,
+            ok,
+            match (bin, ok) {
+                (_, true) => "",
+                ("pdftotext" | "pdfinfo", false) => "needed to read PDFs at all",
+                ("pdftoppm", false) => "without it, image-only PDFs cannot be looked at",
+                _ => "without it, no chapter indexes can be built",
+            },
+        );
+    }
+
+    println!("\nModels");
+    let llama_built = cfg!(feature = "llama");
+    found(
+        "llama backend",
+        llama_built,
+        if llama_built { "" } else { "rebuild with --features cuda" },
+    );
+    for (label, path) in [
+        ("text model", &cfg.model.path),
+        ("vision model", &cfg.vision.path),
+        ("vision projector", &cfg.vision.mmproj),
+    ] {
+        let size = std::fs::metadata(path).map(|m| m.len()).ok();
+        found(
+            label,
+            size.is_some(),
+            &match size {
+                Some(n) => format!("{:.1} GB  {}", n as f64 / 1e9, path.display()),
+                None => format!("missing: {}", path.display()),
+            },
+        );
+    }
+
+    println!("\nGPU");
+    let gpu = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name,memory.total", "--format=csv,noheader"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    found(
+        "nvidia-smi",
+        gpu.is_some(),
+        gpu.as_deref().unwrap_or("no NVIDIA GPU visible; the model will run on CPU"),
+    );
+
+    println!("\nPaths");
+    let pdfs = scan::find_pdfs(&cfg.source, &[cfg.library.clone()]).map(|v| v.len());
+    found(
+        "source",
+        pdfs.as_ref().is_ok_and(|n| *n > 0),
+        &match &pdfs {
+            Ok(n) => format!("{n} PDFs in {}", cfg.source.display()),
+            Err(err) => format!("{}: {err}", cfg.source.display()),
+        },
+    );
+    let library_files = scan::find_pdfs(&cfg.library, &[]).map(|v| v.len()).unwrap_or(0);
+    found("library", true, &format!("{library_files} PDFs in {}", cfg.library.display()));
+    found(
+        "plan",
+        cfg.plan_path().exists(),
+        &if cfg.plan_path().exists() {
+            format!("{}", cfg.plan_path().display())
+        } else {
+            "none yet; run `sorting-hat plan`".to_string()
+        },
+    );
+    let cached = cfg.cache_dir().join("digests.jsonl");
+    let entries = std::fs::read_to_string(&cached).map(|s| s.lines().count()).unwrap_or(0);
+    found("digest cache", entries > 0, &format!("{entries} documents already read"));
+
+    println!();
+    Ok(())
 }
 
 fn load_plan(path: PathBuf) -> Result<Plan> {
