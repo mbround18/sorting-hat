@@ -468,6 +468,50 @@ mod tests {
         assert_eq!(nested[3].level, 2);
     }
 
+    fn entry(level: usize, title: &str, page: usize) -> Entry {
+        Entry { level, title: title.into(), page }
+    }
+
+    #[test]
+    fn builds_a_tree_from_flat_levels() {
+        let flat = vec![
+            entry(0, "Part One", 1),
+            entry(1, "Chapter One", 2),
+            entry(2, "A Section", 3),
+            entry(1, "Chapter Two", 4),
+            entry(0, "Part Two", 5),
+        ];
+        let t = tree(&flat);
+        assert_eq!(
+            shape(&t),
+            vec![
+                (0, "Part One".into()),
+                (1, "Chapter One".into()),
+                (2, "A Section".into()),
+                (1, "Chapter Two".into()),
+                (0, "Part Two".into()),
+            ]
+        );
+        assert_eq!(count_nodes(&t), 5);
+    }
+
+    #[test]
+    fn a_subsection_with_no_section_above_it_is_still_kept() {
+        // Level jumps from 0 straight to 2. Dropping it would lose a heading;
+        // it attaches to whatever is open instead.
+        let flat = vec![entry(0, "Part One", 1), entry(2, "Orphan", 2)];
+        let t = tree(&flat);
+        assert_eq!(count_nodes(&t), 2, "nothing may be lost: {:?}", shape(&t));
+        assert_eq!(shape(&t)[1], (1, "Orphan".to_string()));
+    }
+
+    #[test]
+    fn a_document_starting_deep_still_produces_a_tree() {
+        let flat = vec![entry(3, "Deep First", 1), entry(3, "Deep Second", 2)];
+        let t = tree(&flat);
+        assert_eq!(count_nodes(&t), 2);
+    }
+
     #[test]
     fn nesting_respects_the_depth_limit() {
         let c: Vec<Candidate> = (0..6)
@@ -561,6 +605,19 @@ fn tree(entries: &[Entry]) -> Vec<Node> {
         open.push(current.len() - 1);
     }
     roots
+}
+
+#[cfg(test)]
+fn shape(nodes: &[Node]) -> Vec<(usize, String)> {
+    fn walk(nodes: &[Node], depth: usize, out: &mut Vec<(usize, String)>) {
+        for n in nodes {
+            out.push((depth, n.title.clone()));
+            walk(&n.children, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, 0, &mut out);
+    out
 }
 
 fn count_nodes(nodes: &[Node]) -> usize {

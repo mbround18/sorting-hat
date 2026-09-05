@@ -128,8 +128,16 @@ pub fn content_key(path: &Path, min_chars: usize, timeout_secs: u64) -> Option<S
     }
     let text = run(timeout_secs, "pdftotext", &["-q", "-enc", "UTF-8", &path.to_string_lossy(), "-"])
         .ok()?;
+    text_key(&text, min_chars)
+}
 
-    // Whitespace differs between re-saves of the same document; the words do not.
+/// Hash a document's words, or decline if there are too few to identify it.
+///
+/// Whitespace is dropped before hashing: it differs between re-saves of the
+/// same document and the words do not.
+pub fn text_key(text: &str, min_chars: usize) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
     let mut hasher = Sha256::new();
     let mut chars = 0usize;
     for c in text.chars().filter(|c| !c.is_whitespace()) {
@@ -244,6 +252,31 @@ mod tests {
         let meaningful = text.chars().filter(|c| !c.is_whitespace()).count();
         assert_eq!(meaningful, 30);
         assert!(meaningful < text.len(), "spaces must not pad the count");
+    }
+
+    /// The guard that keeps image-only PDFs apart. Without it every one of them
+    /// hashes to the empty string and matches all the others — 13 such files in
+    /// the test corpus, which would have been folded into a single document.
+    #[test]
+    fn a_document_with_too_little_text_declines_to_identify_itself() {
+        assert_eq!(super::text_key("", 500), None);
+        assert_eq!(super::text_key("   \n  \t ", 500), None);
+        assert_eq!(super::text_key("a few words only", 500), None);
+    }
+
+    #[test]
+    fn the_same_words_hash_alike_however_they_are_spaced() {
+        let long: String = "lorem ipsum dolor sit amet ".repeat(40);
+        let respaced = long.replace(' ', "\n  ");
+        assert_eq!(super::text_key(&long, 100), super::text_key(&respaced, 100));
+        assert!(super::text_key(&long, 100).is_some());
+    }
+
+    #[test]
+    fn different_documents_hash_differently() {
+        let a: String = "the first document says one thing ".repeat(40);
+        let b: String = "the second document says another thing ".repeat(40);
+        assert_ne!(super::text_key(&a, 100), super::text_key(&b, 100));
     }
 
     #[test]
