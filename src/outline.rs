@@ -152,6 +152,13 @@ fn join_lines(runs: Vec<Candidate>, threshold: f32) -> Vec<Candidate> {
         line.sort_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal));
         let mut joined = line.remove(0);
         for run in line {
+            // Some books draw a heading twice, offset, for a shadow or outline
+            // effect. Both copies land on the same line, and concatenating them
+            // gives "Applied Sciences Applied Sciences".
+            if joined.text == run.text || joined.text.ends_with(&run.text) {
+                joined.size = joined.size.max(run.size);
+                continue;
+            }
             // No space when joining a lone initial to the rest of its word,
             // which is how small caps arrive: "C" + "LASS".
             let lone_initial = joined
@@ -384,6 +391,19 @@ mod tests {
         let found = parse(xml, 1.6);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].text, "CLASS FEATURES");
+    }
+
+    #[test]
+    fn collapses_headings_drawn_twice_for_a_shadow_effect() {
+        let xml = r##"<pdf2xml><page number="1">
+<fontspec id="0" size="10"/><fontspec id="1" size="30"/>
+<text top="50" left="10" height="30" font="1">Applied Sciences</text>
+<text top="51" left="12" height="30" font="1">Applied Sciences</text>
+<text top="300" left="10" height="12" font="0">Body text comfortably the most common size on this page by a wide margin.</text>
+</page></pdf2xml>"##;
+        let found = parse(xml, 1.6);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].text, "Applied Sciences");
     }
 
     #[test]
