@@ -83,10 +83,27 @@ image-only PDF hashes to the empty string and matches all the others. There were
 Nothing is ever deleted; the copies that are not filed are listed under
 `duplicates` in the plan. Turn this off with `[dedupe] near_duplicates = false`.
 
-## Writing the naming back into the PDF
+## Writing what we know back into the PDFs
+
+Each concern is its own command, and each is safe to re-run.
 
     sorting-hat plan --mode copy
-    sorting-hat apply --write-metadata
+    sorting-hat apply                 # place the files
+    sorting-hat metadata              # title, author, subject, keywords
+    sorting-hat bookmarks --refine    # and a chapter index
+
+`bookmarks --dry-run` and `metadata --dry-run` say what they would do and write
+nothing.
+
+They are separate ideas but they cannot be separate *rewrites*: lopdf often
+cannot re-read a file it has just written — 91 of 247 here — so a second pass
+over its own output would silently skip a third of the library. Every
+enrichment therefore starts again from the pristine source: the filed copy is
+replaced, then everything known about the document is applied in one load and
+one save. That makes the commands idempotent and order-independent, and running
+`metadata` after `bookmarks` keeps the index rather than destroying it. Derived
+indexes are cached by source hash, so the expensive half — reading headings, and
+the model judging them — happens once.
 
 A folder tree lives only in this tool's head — copy a file out of the library
 and the knowledge is gone. `--write-metadata` stamps what the model worked out

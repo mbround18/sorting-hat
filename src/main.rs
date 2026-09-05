@@ -5,6 +5,7 @@ mod apply;
 mod brain;
 mod cache;
 mod config;
+mod enrich;
 mod extract;
 mod metadata;
 mod naming;
@@ -177,58 +178,50 @@ enum Command {
         #[arg(long, value_enum)]
         mode: Option<LinkMode>,
 
-        /// Write the title, author, subject and keywords into each PDF, so the
-        /// naming travels with the file. Needs a plan made with --mode copy or
-        /// --mode move: a hard link or symlink is the same file as the
-        /// original, and stamping one would rewrite your source PDFs.
-        #[arg(long = "metadata", alias = "write-metadata")]
-        write_metadata: bool,
-
-        /// Build a chapter index (PDF bookmarks) for documents that have none,
-        /// in the same rewrite as the metadata. Same mode requirement.
-        #[arg(long = "bookmarks", alias = "write-bookmarks")]
-        write_bookmarks: bool,
-
-        /// Have the model judge which headings are real chapters. Without it,
-        /// type size alone decides: instant and free, but it keeps sidebar
-        /// titles and stat-block names that are not really chapters.
-        #[arg(long, requires = "write_bookmarks")]
-        refine: bool,
-
         /// Say what would happen, and write nothing.
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// Add a chapter index to an already-built library.
+    /// Build a chapter index for filed documents that have none.
     ///
-    /// Prefer `apply --bookmarks`, which reads the headings from the pristine
-    /// sources and writes them in the same pass as everything else. This
-    /// command rewrites files this tool has already rewritten, and lopdf cannot
-    /// reliably re-read its own output — expect roughly a third to be skipped.
-    #[command(hide = true)]
-    Bookmark {
-        /// Have the model judge which headings are real. Without it, type size
-        /// alone decides: instant and free, but it keeps sidebar titles and
-        /// stat-block names that are not really chapters.
+    /// Reads headings from each document's source, so nothing depends on a copy
+    /// this tool has already rewritten, then replaces the filed copy carrying
+    /// both its index and its metadata. Derived indexes are cached, so running
+    /// this again is cheap and does not re-run the model.
+    Bookmarks {
+        /// Have the model judge which headings are real chapters. Without it,
+        /// type size alone decides: instant and free, but it keeps sidebar
+        /// titles and stat-block names that are not really chapters.
         #[arg(long)]
         refine: bool,
 
-        /// Rebuild the index even for documents that already have one.
+        /// Say what would happen, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Re-derive indexes that are already cached.
         #[arg(long)]
         force: bool,
 
         /// Skip documents shorter than this.
-        #[arg(long)]
+        #[arg(long, value_name = "N")]
         min_pages: Option<usize>,
 
-        /// Report what would change without writing anything.
+        /// Only look at the first N documents.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+
+    /// Write the catalogue into the filed PDFs.
+    ///
+    /// Title, author, subject and keywords go into each document's own Info
+    /// dictionary, so the naming travels with the file. Any chapter index
+    /// already derived is written at the same time.
+    Metadata {
+        /// Say what would happen, and write nothing.
         #[arg(long)]
         dry_run: bool,
-
-        /// Stop after this many documents.
-        #[arg(long)]
-        limit: Option<usize>,
     },
 
     /// Check this machine has what the tool needs.
@@ -298,15 +291,21 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut enrich = apply::Enrichment {
-                outlines: Default::default(),
-                max_growth: cfg.bookmarks.max_growth,
-            };
-            if bookmarks {
-                enrich.outlines = prepare_outlines(&cfg, &plan, refine, &cli.common)?;
+            let outcome = apply::apply(&plan, &cfg.work_dir)?;
+            report_apply(&outcome);
+
+            if metadata || bookmarks {
+                let mut cache = enrich::OutlineCache::open(&cfg.cache_dir())?;
+                if bookmarks {
+                    let derived = derive_outlines(
+                        &cfg, &plan, &mut cache, &cli.common, refine, false, None, None,
+                    )?;
+                    cache.save(&cfg.cache_dir())?;
+                    println!("chapter indexes ready for {derived} documents");
+                }
+                let done = enrich::refresh(&plan, &cache, cfg.bookmarks.max_growth, false)?;
+                report_enrich(&done, false);
             }
-            let outcome = apply::apply(&plan, &cfg.work_dir, metadata, &enrich)?;
-            report_apply(&outcome, metadata, bookmarks);
         }
 
         Command::Show { full, plan } => {
@@ -321,7 +320,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Apply { plan, yes, mode, write_metadata, write_bookmarks, refine, dry_run } => {
+        Command::Apply { plan, yes, mode, dry_run } => {
             let path = plan.unwrap_or_else(|| cfg.plan_path());
             let mut plan = load_plan(path)?;
             if let Some(mode) = mode {
@@ -332,17 +331,6 @@ fn main() -> Result<()> {
             }
 
             println!("\n{}", report::summary(&plan));
-            if write_metadata || write_bookmarks {
-                // Fail before the prompt rather than after the work.
-                metadata::may_write(plan.mode)?;
-            }
-            if write_metadata {
-                println!("  Each filed PDF will be stamped with its title, author and keywords.");
-            }
-            if write_bookmarks {
-                println!("  Documents without a chapter index will be given one.");
-            }
-            println!();
             if plan.mode == LinkMode::Move {
                 println!("  This MOVES the originals out of {}.\n", plan.source_root.display());
             }
@@ -358,30 +346,37 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut enrich = apply::Enrichment {
-                outlines: Default::default(),
-                max_growth: cfg.bookmarks.max_growth,
-            };
-            if write_bookmarks {
-                // Prepared from the sources, before anything is written: the
-                // headings are read from pristine files rather than from
-                // copies this run has already rewritten.
-                enrich.outlines = prepare_outlines(&cfg, &plan, refine, &cli.common)?;
-            }
+            let outcome = apply::apply(&plan, &cfg.work_dir)?;
+            report_apply(&outcome);
 
-            let outcome = apply::apply(&plan, &cfg.work_dir, write_metadata, &enrich)?;
-            report_apply(&outcome, write_metadata, write_bookmarks);
+            if matches!(plan.mode, LinkMode::Copy | LinkMode::Move) {
+                println!("\nTo write the catalogue into the files themselves:");
+                println!("  sorting-hat metadata             title, author and keywords");
+                println!("  sorting-hat bookmarks --refine   and a chapter index");
+            }
         }
 
-        Command::Bookmark { refine, force, min_pages, dry_run, limit } => {
-            let mut brain = if refine {
-                let brain = select_backend(&cli.common, &cfg)?;
-                tracing::info!(backend = brain.name(), "refining headings with the model");
-                Some(brain)
-            } else {
-                None
-            };
-            bookmark_library(&cfg, brain.as_deref_mut(), refine, force, min_pages, dry_run, limit)?;
+        Command::Bookmarks { refine, dry_run, force, min_pages, limit } => {
+            let plan = load_plan(cfg.plan_path())?;
+            metadata::may_write(plan.mode)?;
+
+            let mut cache = enrich::OutlineCache::open(&cfg.cache_dir())?;
+            let derived = derive_outlines(
+                &cfg, &plan, &mut cache, &cli.common, refine, force, min_pages, limit,
+            )?;
+            cache.save(&cfg.cache_dir())?;
+            println!("\nchapter indexes ready for {derived} documents");
+
+            let outcome = enrich::refresh(&plan, &cache, cfg.bookmarks.max_growth, dry_run)?;
+            report_enrich(&outcome, dry_run);
+        }
+
+        Command::Metadata { dry_run } => {
+            let plan = load_plan(cfg.plan_path())?;
+            metadata::may_write(plan.mode)?;
+            let cache = enrich::OutlineCache::open(&cfg.cache_dir())?;
+            let outcome = enrich::refresh(&plan, &cache, cfg.bookmarks.max_growth, dry_run)?;
+            report_enrich(&outcome, dry_run);
         }
 
         Command::Doctor => doctor(&cfg)?,
@@ -489,190 +484,66 @@ fn select_eyes(_common: &Common, _cfg: &config::Config) -> Option<Box<dyn pipeli
     None
 }
 
-/// Build a chapter index across the library.
+/// Work out a chapter index for each source document that needs one.
+///
+/// Cached results are reused unless `force` is set, so the model is asked about
+/// a document once and not again.
 #[allow(clippy::too_many_arguments)]
-fn bookmark_library(
+fn derive_outlines(
     cfg: &config::Config,
-    mut brain: Option<&mut (dyn Brain + '_)>,
+    plan: &Plan,
+    cache: &mut enrich::OutlineCache,
+    common: &Common,
     refine: bool,
     force: bool,
     min_pages: Option<usize>,
-    dry_run: bool,
     limit: Option<usize>,
-) -> Result<()> {
+) -> Result<usize> {
     let min_pages = min_pages.unwrap_or(cfg.bookmarks.min_pages);
-    let mut files = scan::find_pdfs(&cfg.library, &[])?;
-    if files.is_empty() {
-        anyhow::bail!(
-            "no PDFs under {}; run `sorting-hat apply` first",
-            cfg.library.display()
-        );
-    }
-    if let Some(limit) = limit {
-        files.truncate(limit);
-    }
-
-    let bar = indicatif::ProgressBar::new(files.len() as u64);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template("indexing    [{bar:32}] {pos}/{len} {eta_precise}")
-            .expect("static template")
-            .progress_chars("=> "),
-    );
-
-    let mut indexed = 0usize;
-    let mut bookmarks = 0usize;
-    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
-
-    for file in &files {
-        bar.inc(1);
-
-        let pages = extract::page_count(file, cfg.extract.timeout_secs).unwrap_or(0);
-        if pages < min_pages {
-            skipped.push((file.clone(), outline::Skip::TooShort { pages }.to_string()));
-            continue;
-        }
-        // Checked before the expensive part: reading a document only to find it
-        // cannot be written wastes the whole effort.
-        match lopdf::Document::load(file) {
-            Ok(doc) => {
-                if doc.is_encrypted() {
-                    skipped.push((file.clone(), outline::Skip::Encrypted.to_string()));
-                    continue;
-                }
-                if !force && outline::has_outline(&doc) {
-                    skipped.push((file.clone(), outline::Skip::AlreadyIndexed.to_string()));
-                    continue;
-                }
-            }
-            Err(err) => {
-                skipped.push((file.clone(), outline::Skip::Unreadable(err.to_string()).to_string()));
-                continue;
-            }
-        }
-
-        let found = match outline::candidates(file, cfg.bookmarks.min_ratio, cfg.extract.timeout_secs)
-        {
-            Ok(found) if !found.is_empty() => found,
-            Ok(_) => {
-                skipped.push((file.clone(), outline::Skip::NoHeadings.to_string()));
-                continue;
-            }
-            Err(err) => {
-                skipped.push((file.clone(), format!("{err:#}")));
-                continue;
-            }
-        };
-
-        let mut entries = outline::nest(&found, cfg.bookmarks.max_depth);
-
-        if refine {
-            let lines: Vec<(usize, String, usize)> = entries
-                .iter()
-                .enumerate()
-                .map(|(i, e)| (i, e.title.clone(), e.page))
-                .collect();
-            match brain.as_deref_mut().map(|b| b.refine_headings(&lines, cfg.bookmarks.max_depth)) {
-                Some(Ok(Some(picks))) if !picks.is_empty() => {
-                    entries = picks
-                        .into_iter()
-                        .filter_map(|(i, level)| {
-                            entries.get(i).map(|e| outline::Entry { level, ..e.clone() })
-                        })
-                        .collect();
-                }
-                Some(Err(err)) => {
-                    tracing::warn!(path = %file.display(), %err, "refinement failed; keeping the type-size guess");
-                }
-                _ => {}
-            }
-        }
-
-        if dry_run {
-            indexed += 1;
-            bookmarks += entries.len();
-            continue;
-        }
-
-        match outline::write(file, &entries, cfg.bookmarks.max_growth) {
-            Ok(n) => {
-                indexed += 1;
-                bookmarks += n;
-            }
-            Err(skip) => skipped.push((file.clone(), skip.to_string())),
-        }
-    }
-    bar.finish_and_clear();
-
-    println!();
-    if dry_run {
-        println!("would index {indexed} documents with {bookmarks} bookmarks");
-    } else {
-        println!("indexed {indexed} documents with {bookmarks} bookmarks");
-    }
-
-    if !skipped.is_empty() {
-        // Grouped by reason: forty lines of "only 4 pages" tells the user less
-        // than one line saying forty documents were too short.
-        let mut reasons: std::collections::BTreeMap<String, Vec<&PathBuf>> = Default::default();
-        for (path, why) in &skipped {
-            // Group on the reason, not its particulars: "grew from 4 to 9 bytes"
-            // and "grew from 5 to 11" are one story, told once.
-            let key = why.split(" from ").next().unwrap_or(why).to_string();
-            reasons.entry(key).or_default().push(path);
-        }
-        println!("\nleft alone ({}):", skipped.len());
-        for (why, paths) in &reasons {
-            println!("  {} — {why}", paths.len());
-            for path in paths.iter().take(3) {
-                println!("      {}", path.display());
-            }
-            if paths.len() > 3 {
-                println!("      ... and {} more", paths.len() - 3);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Read chapter headings from every source document that wants an index.
-///
-/// Done before anything is written, and always from the source rather than the
-/// filed copy, so the headings come out of a pristine file.
-fn prepare_outlines(
-    cfg: &config::Config,
-    plan: &Plan,
-    refine: bool,
-    common: &Common,
-) -> Result<std::collections::HashMap<PathBuf, Vec<outline::Entry>>> {
     let mut brain = if refine {
         let brain = select_backend(common, cfg)?;
-        tracing::info!(backend = brain.name(), "refining headings with the model");
+        tracing::info!(backend = brain.name(), "the model will judge which headings are real");
         Some(brain)
     } else {
         None
     };
 
-    let bar = indicatif::ProgressBar::new(plan.assignments.len() as u64);
+    let assignments: Vec<_> = plan.assignments.iter().take(limit.unwrap_or(usize::MAX)).collect();
+    let bar = indicatif::ProgressBar::new(assignments.len() as u64);
     bar.set_style(
         indicatif::ProgressStyle::with_template("headings    [{bar:32}] {pos}/{len} {eta_precise}")
             .expect("static template")
             .progress_chars("=> "),
     );
 
-    let mut out = std::collections::HashMap::new();
-    for assignment in &plan.assignments {
+    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
+    let mut derived = 0usize;
+
+    for assignment in assignments {
         bar.inc(1);
+        if !force && cache.get(&assignment.hash).is_some() {
+            derived += 1;
+            continue;
+        }
         let source = &assignment.source;
 
         let pages = extract::page_count(source, cfg.extract.timeout_secs).unwrap_or(0);
-        if pages < cfg.bookmarks.min_pages {
+        if pages < min_pages {
+            skipped.push((source.clone(), outline::Skip::TooShort { pages }.to_string()));
             continue;
         }
 
         let found =
             match outline::candidates(source, cfg.bookmarks.min_ratio, cfg.extract.timeout_secs) {
                 Ok(found) if !found.is_empty() => found,
-                _ => continue,
+                Ok(_) => {
+                    skipped.push((source.clone(), outline::Skip::NoHeadings.to_string()));
+                    continue;
+                }
+                Err(err) => {
+                    skipped.push((source.clone(), format!("{err:#}")));
+                    continue;
+                }
             };
         let mut entries = outline::nest(&found, cfg.bookmarks.max_depth);
 
@@ -694,18 +565,34 @@ fn prepare_outlines(
                 Ok(_) => {}
                 Err(err) => tracing::warn!(
                     path = %source.display(), %err,
-                    "refinement failed; keeping the type-size guess"
+                    "the model could not judge these; keeping the type-size guess"
                 ),
             }
         }
 
-        if !entries.is_empty() {
-            out.insert(source.clone(), entries);
+        if entries.is_empty() {
+            skipped.push((source.clone(), outline::Skip::NoHeadings.to_string()));
+            continue;
         }
+        cache.put(&assignment.hash, &entries);
+        derived += 1;
     }
     bar.finish_and_clear();
-    tracing::info!(documents = out.len(), "chapter headings prepared");
-    Ok(out)
+    summarise_skips(&skipped);
+    Ok(derived)
+}
+
+/// Print what an enrichment pass did.
+fn report_enrich(outcome: &enrich::Outcome, dry_run: bool) {
+    let verb = if dry_run { "would rewrite" } else { "rewrote" };
+    println!(
+        "{verb} {} documents: {} stamped, {} indexed with {} bookmarks",
+        outcome.refreshed, outcome.stamped, outcome.indexed, outcome.bookmarks
+    );
+    if dry_run {
+        println!("Dry run: nothing was written. Drop --dry-run to carry this out.");
+    }
+    summarise_skips(&outcome.skipped);
 }
 
 /// Print skip reasons grouped, so one story is told once.
@@ -747,7 +634,7 @@ fn run_plan(
 }
 
 /// Print what an apply actually did.
-fn report_apply(outcome: &apply::Report, metadata: bool, bookmarks: bool) {
+fn report_apply(outcome: &apply::Report) {
     println!(
         "\nfiled {}, already present {}, failed {}",
         outcome.filed,
@@ -759,26 +646,6 @@ fn report_apply(outcome: &apply::Report, metadata: bool, bookmarks: bool) {
     }
     if outcome.failed.len() > 10 {
         println!("  ... and {} more", outcome.failed.len() - 10);
-    }
-    if metadata {
-        println!(
-            "stamped {} PDFs, {} could not be stamped",
-            outcome.stamped,
-            outcome.stamp_failed.len()
-        );
-        for (path, err) in outcome.stamp_failed.iter().take(10) {
-            println!("  {} — {err}", path.display());
-        }
-        if outcome.stamp_failed.len() > 10 {
-            println!("  ... and {} more", outcome.stamp_failed.len() - 10);
-        }
-    }
-    if bookmarks {
-        println!(
-            "indexed {} documents with {} bookmarks",
-            outcome.indexed, outcome.bookmarks
-        );
-        summarise_skips(&outcome.index_skipped);
     }
     if let Some(manifest) = &outcome.manifest {
         println!("\nundo with: sorting-hat undo {}", manifest.display());

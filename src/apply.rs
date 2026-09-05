@@ -4,55 +4,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 
-use crate::metadata;
-use crate::outline;
 use crate::types::{LinkMode, Plan, UndoAction, UndoManifest};
-
-/// Above this confidence, our metadata replaces what the PDF already carries.
-const OVERWRITE_CONFIDENCE: f32 = 0.6;
 
 pub struct Report {
     pub filed: usize,
     pub skipped: usize,
     pub failed: Vec<(PathBuf, String)>,
     pub manifest: Option<PathBuf>,
-    pub stamped: usize,
-    pub stamp_failed: Vec<(PathBuf, String)>,
-    pub indexed: usize,
-    pub bookmarks: usize,
-    pub index_skipped: Vec<(PathBuf, String)>,
-}
-
-/// What each filed document should be enriched with.
-///
-/// Whether metadata is written is passed separately, because it is also the
-/// flag that gates the link-mode check; this carries the work itself.
-#[derive(Default)]
-pub struct Enrichment {
-    /// Bookmark entries per source path, prepared before anything is written.
-    pub outlines: std::collections::HashMap<PathBuf, Vec<outline::Entry>>,
-    pub max_growth: f32,
 }
 
 /// Carry out a plan. Every created file is recorded first, so an interrupted
 /// run is still fully reversible.
-pub fn apply(
-    plan: &Plan,
-    work_dir: &Path,
-    write_metadata: bool,
-    enrich: &Enrichment,
-) -> Result<Report> {
-    // Checked before anything is created, so a refused combination costs nothing.
-    if write_metadata {
-        metadata::may_write(plan.mode)?;
-        if plan.assignments.iter().all(|a| a.digest.is_none()) {
-            anyhow::bail!(
-                "this plan was made before metadata was recorded; re-run `sorting-hat plan` \
-to produce one that can be stamped"
-            );
-        }
-    }
-
+pub fn apply(plan: &Plan, work_dir: &Path) -> Result<Report> {
     let root = &plan.library_root;
     std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
 
@@ -74,11 +37,6 @@ to produce one that can be stamped"
         skipped: 0,
         failed: Vec::new(),
         manifest: None,
-        stamped: 0,
-        stamp_failed: Vec::new(),
-        indexed: 0,
-        bookmarks: 0,
-        index_skipped: Vec::new(),
     };
 
     for assignment in &plan.assignments {
@@ -95,31 +53,6 @@ to produce one that can be stamped"
                 });
                 report.filed += 1;
 
-                // One load, one save, every change at once: lopdf cannot
-                // reliably re-read what it has written, so a document gets
-                // exactly one rewrite or it gets none.
-                let wants_outline = enrich.outlines.get(&assignment.source);
-                if write_metadata || wants_outline.is_some() {
-                    match rewrite(&dest, assignment, write_metadata, wants_outline, enrich.max_growth)
-                    {
-                        Ok(done) => {
-                            if done.stamped {
-                                report.stamped += 1;
-                            }
-                            if done.bookmarks > 0 {
-                                report.indexed += 1;
-                                report.bookmarks += done.bookmarks;
-                            }
-                            if let Some(why) = done.outline_skipped {
-                                report.index_skipped.push((dest.clone(), why));
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!(path = %dest.display(), %err, "could not enrich");
-                            report.stamp_failed.push((dest.clone(), format!("{err:#}")));
-                        }
-                    }
-                }
             }
             Ok(Placed::AlreadyThere) => report.skipped += 1,
             Err(err) => {
@@ -142,61 +75,6 @@ to produce one that can be stamped"
     }
 
     Ok(report)
-}
-
-struct Enriched {
-    stamped: bool,
-    bookmarks: usize,
-    outline_skipped: Option<String>,
-}
-
-/// Load a filed document once, make every requested change, save it once.
-fn rewrite(
-    dest: &Path,
-    assignment: &crate::types::Assignment,
-    write_metadata: bool,
-    entries: Option<&Vec<outline::Entry>>,
-    _max_growth: f32,
-) -> Result<Enriched> {
-    let mut doc = lopdf::Document::load(dest)
-        .with_context(|| format!("reading {} to enrich it", dest.display()))?;
-    if doc.is_encrypted() {
-        anyhow::bail!("PDF is encrypted; leaving it alone");
-    }
-
-    let mut changed = false;
-    let mut done = Enriched { stamped: false, bookmarks: 0, outline_skipped: None };
-
-    if write_metadata {
-        if let Some(digest) = &assignment.digest {
-            let overwrite = digest.confidence >= OVERWRITE_CONFIDENCE;
-            if !metadata::apply_to_doc(&mut doc, digest, overwrite).is_empty() {
-                done.stamped = true;
-                changed = true;
-            }
-        }
-    }
-
-    if let Some(entries) = entries {
-        if outline::has_outline(&doc) {
-            done.outline_skipped = Some(outline::Skip::AlreadyIndexed.to_string());
-        } else {
-            match outline::apply_to_doc(&mut doc, entries) {
-                Ok(n) => {
-                    done.bookmarks = n;
-                    changed = true;
-                }
-                Err(skip) => done.outline_skipped = Some(skip.to_string()),
-            }
-        }
-    }
-
-    if changed {
-        // The same plausibility guard the metadata path uses: a rewrite that
-        // balloons the file is discarded and the good copy kept.
-        metadata::save_atomically(&mut doc, dest)?;
-    }
-    Ok(done)
 }
 
 enum Placed {

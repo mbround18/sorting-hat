@@ -131,7 +131,7 @@ fn current_info(doc: &Document) -> Dictionary {
 /// one 2.8 MB rulebook became 8.2 MB in testing. `compress` puts the streams
 /// back; if the result is still wildly different from the original, the stamp
 /// is abandoned and the good file left alone.
-pub fn save_atomically(doc: &mut Document, path: &Path) -> Result<()> {
+pub fn save_atomically(doc: &mut Document, path: &Path, max_growth: f32) -> Result<()> {
     let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     doc.compress();
@@ -140,7 +140,7 @@ pub fn save_atomically(doc: &mut Document, path: &Path) -> Result<()> {
     doc.save(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
     let after = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
 
-    if let Err(err) = plausible(before, after) {
+    if let Err(err) = plausible(before, after, max_growth) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
@@ -153,7 +153,7 @@ pub fn save_atomically(doc: &mut Document, path: &Path) -> Result<()> {
 ///
 /// Metadata is a few hundred bytes, so a small change either way is expected;
 /// anything dramatic means the rewrite did something other than what we asked.
-fn plausible(before: u64, after: u64) -> Result<()> {
+fn plausible(before: u64, after: u64, max_growth: f32) -> Result<()> {
     if before == 0 {
         return Ok(());
     }
@@ -163,7 +163,7 @@ fn plausible(before: u64, after: u64) -> Result<()> {
         ));
     }
     // A megabyte of slack, so small files are not judged by ratio alone.
-    let ceiling = before + (before / 4).max(1 << 20);
+    let ceiling = before + ((before as f32 * max_growth) as u64).max(1 << 20);
     if after > ceiling {
         return Err(anyhow!(
             "rewriting grew the PDF from {before} to {after} bytes; discarding the result rather \
@@ -216,11 +216,11 @@ mod tests {
     #[test]
     fn rejects_implausible_rewrites() {
         let mb = 1u64 << 20;
-        assert!(plausible(10 * mb, 10 * mb + 500).is_ok(), "a few hundred bytes is normal");
-        assert!(plausible(10 * mb, 4 * mb).is_err(), "losing half the file is corruption");
-        assert!(plausible(10 * mb, 30 * mb).is_err(), "tripling the file is bloat");
-        assert!(plausible(1000, 1500).is_ok(), "small files get absolute slack, not a ratio");
-        assert!(plausible(0, 5000).is_ok(), "an unknown original cannot be judged");
+        assert!(plausible(10 * mb, 10 * mb + 500, 0.25).is_ok(), "a few hundred bytes is normal");
+        assert!(plausible(10 * mb, 4 * mb, 0.25).is_err(), "losing half the file is corruption");
+        assert!(plausible(10 * mb, 30 * mb, 0.25).is_err(), "tripling the file is bloat");
+        assert!(plausible(1000, 1500, 0.25).is_ok(), "small files get absolute slack, not a ratio");
+        assert!(plausible(0, 5000, 0.25).is_ok(), "an unknown original cannot be judged");
     }
 
     #[test]
