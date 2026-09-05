@@ -24,6 +24,11 @@ pub struct Candidate {
     pub size: f32,
     /// Distance from the top of the page, used to recover reading order.
     pub top: f32,
+    /// Distance from the left edge, used to order runs within a line.
+    pub left: f32,
+    /// Bottom edge of the run. Text sharing a baseline shares a line, even when
+    /// set at different sizes — which is exactly how small caps are typeset.
+    pub baseline: f32,
     pub text: String,
 }
 
@@ -82,6 +87,12 @@ fn parse(xml: &str, min_ratio: f32) -> Vec<Candidate> {
         return Vec::new();
     }
 
+    // Small-caps headings are set as a large first letter followed by the rest
+    // in smaller capitals, and pdftohtml reports them as two runs. Filtering
+    // first would keep "LASS" and throw away the "C" — so runs sharing a line
+    // are joined back together before anything is judged.
+    let runs = join_lines(runs, body * min_ratio);
+
     let mut out: Vec<Candidate> = runs
         .into_iter()
         .filter(|run| run.size >= body * min_ratio && plausible_heading(&run.text))
@@ -99,6 +110,72 @@ fn parse(xml: &str, min_ratio: f32) -> Vec<Candidate> {
 
     // Same heading on consecutive pages is a running header, not a chapter.
     out.dedup_by(|a, b| a.text == b.text && a.page.abs_diff(b.page) <= 1);
+    out
+}
+
+/// Join text runs that sit on the same line into one candidate.
+///
+/// Only runs already large enough to be headings are joined: body text must not
+/// be glued onto the end of a title. The joined run takes the largest size
+/// present, which is the initial capital in small-caps setting.
+fn join_lines(runs: Vec<Candidate>, threshold: f32) -> Vec<Candidate> {
+    let mut ordered: Vec<Candidate> = runs.into_iter().filter(|r| r.size >= threshold).collect();
+    if ordered.is_empty() {
+        return ordered;
+    }
+
+    // Lines are found first, then read across. Sorting straight by baseline and
+    // left is not enough: in "CLASS FEATURES" set as small caps the initials
+    // sit on baseline 93 and the letters after them on 91, so a plain sort
+    // gathers "LASS EATURES" ahead of "C F". Runs are grouped into lines by
+    // baseline proximity, and only then ordered left to right within the line.
+    ordered.sort_by(|a, b| {
+        a.page
+            .cmp(&b.page)
+            .then(a.baseline.partial_cmp(&b.baseline).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut lines: Vec<Vec<Candidate>> = Vec::new();
+    for run in ordered {
+        match lines.last_mut() {
+            Some(line)
+                if line[0].page == run.page && (line[0].baseline - run.baseline).abs() <= 4.0 =>
+            {
+                line.push(run)
+            }
+            _ => lines.push(vec![run]),
+        }
+    }
+
+    let mut out = Vec::with_capacity(lines.len());
+    for mut line in lines {
+        line.sort_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal));
+        let mut joined = line.remove(0);
+        for run in line {
+            // No space when joining a lone initial to the rest of its word,
+            // which is how small caps arrive: "C" + "LASS".
+            let lone_initial = joined
+                .text
+                .rsplit(' ')
+                .next()
+                .is_some_and(|w| w.chars().count() == 1)
+                && run.text.chars().next().is_some_and(|c| c.is_uppercase());
+            if !lone_initial {
+                joined.text.push(' ');
+            }
+            joined.text.push_str(&run.text);
+            joined.size = joined.size.max(run.size);
+            joined.top = joined.top.min(run.top);
+        }
+        out.push(joined);
+    }
+
+    // Back into page order for everything downstream.
+    out.sort_by(|a, b| {
+        a.page
+            .cmp(&b.page)
+            .then(a.top.partial_cmp(&b.top).unwrap_or(std::cmp::Ordering::Equal))
+    });
     out
 }
 
@@ -167,9 +244,11 @@ fn text_runs(xml: &str, fonts: &BTreeMap<String, f32>) -> Vec<Candidate> {
         let Some(size) = fonts.get(&font).copied() else { continue };
 
         let top = attribute(attrs, "top").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let left = attribute(attrs, "left").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let height: f32 = attribute(attrs, "height").and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let text = strip_markup(body);
         if !text.is_empty() {
-            out.push(Candidate { page, size, top, text });
+            out.push(Candidate { page, size, top, left, baseline: top + height, text });
         }
     }
     out
@@ -266,11 +345,58 @@ mod tests {
         // Three tiny headings, one long paragraph: the paragraph is the body.
         let xml = r##"<pdf2xml><page number="1">
 <fontspec id="0" size="10"/><fontspec id="1" size="30"/>
-<text font="1">Aaa</text><text font="1">Bbb</text><text font="1">Ccc</text>
-<text font="0">This single paragraph carries far more characters than the three short headings above it do.</text>
+<text top="10" left="10" height="30" font="1">Aaa</text>
+<text top="100" left="10" height="30" font="1">Bbb</text>
+<text top="200" left="10" height="30" font="1">Ccc</text>
+<text top="300" left="10" height="12" font="0">This single paragraph carries far more characters than the three short headings above it do.</text>
 </page></pdf2xml>"##;
         let found = parse(xml, 1.6);
         assert_eq!(found.len(), 3, "headings, not the paragraph: {found:?}");
+    }
+
+    #[test]
+    fn rejoins_small_caps_headings_split_by_the_extractor() {
+        // "CLASS" set as a large C followed by smaller capitals arrives as two
+        // runs; keeping only the second would bookmark a chapter called "LASS".
+        let xml = r##"<pdf2xml><page number="1">
+<fontspec id="0" size="10"/><fontspec id="1" size="30"/><fontspec id="2" size="22"/>
+<text top="51" left="73" height="40" font="1">C</text>
+<text top="57" left="94" height="34" font="2">LASS FEATURES</text>
+<text top="200" left="10" font="0">Body text that is comfortably the most common size on the page here.</text>
+</page></pdf2xml>"##;
+        let found = parse(xml, 1.6);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].text, "CLASS FEATURES");
+    }
+
+    #[test]
+    fn orders_interleaved_small_caps_across_the_line() {
+        // "CLASS FEATURES" laid out as C(73) LASS(94) F(160) EATURES(187),
+        // with the initials sitting higher than the letters that follow.
+        let xml = r##"<pdf2xml><page number="1">
+<fontspec id="0" size="10"/><fontspec id="1" size="30"/><fontspec id="2" size="24"/>
+<text top="51" left="73" height="40" font="1">C</text>
+<text top="51" left="160" height="40" font="1">F</text>
+<text top="57" left="94" height="34" font="2">LASS</text>
+<text top="57" left="187" height="34" font="2">EATURES</text>
+<text top="200" left="10" height="12" font="0">Body text comfortably the most common size on this page by a wide margin.</text>
+</page></pdf2xml>"##;
+        let found = parse(xml, 1.6);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].text, "CLASS FEATURES");
+    }
+
+    #[test]
+    fn does_not_glue_separate_headings_together() {
+        let xml = r##"<pdf2xml><page number="1">
+<fontspec id="0" size="10"/><fontspec id="1" size="30"/>
+<text top="50" left="10" height="30" font="1">First Heading</text>
+<text top="300" left="10" height="30" font="1">Second Heading</text>
+<text top="600" left="10" font="0">Body text that is comfortably the most common size on the page here.</text>
+</page></pdf2xml>"##;
+        let found = parse(xml, 1.6);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].text, "First Heading");
     }
 
     #[test]
@@ -284,9 +410,9 @@ mod tests {
     #[test]
     fn drops_running_headers_repeated_across_facing_pages() {
         let repeated = vec![
-            Candidate { page: 4, size: 30.0, top: 0.0, text: "Player's Handbook".into() },
-            Candidate { page: 5, size: 30.0, top: 0.0, text: "Player's Handbook".into() },
-            Candidate { page: 6, size: 30.0, top: 0.0, text: "Combat".into() },
+            Candidate { page: 4, size: 30.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Player's Handbook".into() },
+            Candidate { page: 5, size: 30.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Player's Handbook".into() },
+            Candidate { page: 6, size: 30.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Combat".into() },
         ];
         let mut v = repeated.clone();
         v.dedup_by(|a, b| a.text == b.text && a.page.abs_diff(b.page) <= 1);
@@ -310,10 +436,10 @@ mod tests {
     #[test]
     fn nesting_ranks_sizes_rather_than_trusting_points() {
         let c = vec![
-            Candidate { page: 1, size: 45.0, top: 0.0, text: "Part One".into() },
-            Candidate { page: 2, size: 36.0, top: 0.0, text: "Chapter One".into() },
-            Candidate { page: 3, size: 36.0, top: 0.0, text: "Chapter Two".into() },
-            Candidate { page: 4, size: 23.0, top: 0.0, text: "A Section".into() },
+            Candidate { page: 1, size: 45.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Part One".into() },
+            Candidate { page: 2, size: 36.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Chapter One".into() },
+            Candidate { page: 3, size: 36.0, top: 0.0, left: 0.0, baseline: 0.0, text: "Chapter Two".into() },
+            Candidate { page: 4, size: 23.0, top: 0.0, left: 0.0, baseline: 0.0, text: "A Section".into() },
         ];
         let nested = nest(&c, 4);
         assert_eq!(nested[0].level, 0);
@@ -325,7 +451,7 @@ mod tests {
     #[test]
     fn nesting_respects_the_depth_limit() {
         let c: Vec<Candidate> = (0..6)
-            .map(|i| Candidate { page: 1, size: 40.0 - i as f32, top: i as f32, text: format!("H{i}") })
+            .map(|i| Candidate { page: 1, size: 40.0 - i as f32, top: i as f32, left: 0.0, baseline: i as f32, text: format!("H{i}") })
             .collect();
         let nested = nest(&c, 3);
         assert!(nested.iter().all(|e| e.level < 3), "{nested:?}");

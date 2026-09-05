@@ -321,8 +321,40 @@ pub fn headings_grammar(max_index: usize, max_level: usize) -> String {
     let level = max_level.saturating_sub(1).min(9);
     format!(
         r#"root ::= "[" ws (item (ws "," ws item)*)? ws "]"
-item ::= "{{" ws ""i":" ws index ws "," ws ""l":" ws [0-{level}] ws "}}"
+item ::= "{{" ws "\"i\":" ws index ws "," ws "\"l\":" ws [0-{level}] ws "}}"
 index ::= [0-9]{{1,{digits}}}
 {PRIMITIVES}"#
     )
+}
+
+#[cfg(test)]
+mod grammar_shape {
+    /// A JSON key in a GBNF literal must keep its escaped quotes. Losing them
+    /// turns `"\"i\":"` into `""i":"`, which llama.cpp rejects at load time —
+    /// invisible until a model call fails on the GPU, so it is pinned here.
+    #[test]
+    fn json_keys_keep_their_escaped_quotes() {
+        let g = super::headings_grammar(283, 3);
+        assert!(g.contains(r#""\"i\":""#), "lost escapes in:\n{g}");
+        assert!(g.contains(r#""\"l\":""#), "lost escapes in:\n{g}");
+        assert!(!g.contains(r#"""i":""#), "unescaped key in:\n{g}");
+    }
+
+    #[test]
+    fn index_width_follows_the_candidate_count() {
+        assert!(super::headings_grammar(9, 3).contains("[0-9]{1,1}"));
+        assert!(super::headings_grammar(283, 3).contains("[0-9]{1,3}"));
+    }
+
+    /// Every grammar the program can emit must survive the same one-rule-per-
+    /// line rule as the rest.
+    #[test]
+    fn headings_grammar_keeps_one_rule_per_line() {
+        for line in super::headings_grammar(283, 3).lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                assert!(line.contains("::="), "continuation line: {line:?}");
+            }
+        }
+    }
 }
