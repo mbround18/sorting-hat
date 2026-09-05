@@ -8,6 +8,7 @@ mod config;
 mod extract;
 mod metadata;
 mod naming;
+mod outline;
 mod pipeline;
 mod report;
 mod scan;
@@ -120,12 +121,28 @@ enum Command {
         #[arg(long, short = 'y')]
         yes: bool,
 
+        /// Place files differently than the plan recorded, without re-planning.
+        /// The destinations are unaffected — only how each file gets there —
+        /// so a tree you have already reviewed stays exactly as you saw it.
+        #[arg(long, value_enum)]
+        mode: Option<LinkMode>,
+
         /// Write the title, author, subject and keywords into each PDF, so the
         /// naming travels with the file. Needs a plan made with --mode copy or
         /// --mode move: a hard link or symlink is the same file as the
         /// original, and stamping one would rewrite your source PDFs.
         #[arg(long)]
         write_metadata: bool,
+    },
+
+    /// Show the chapter headings the font pass finds in one PDF.
+    Headings {
+        file: PathBuf,
+        /// How much larger than body text a run must be to count.
+        #[arg(long, default_value_t = 1.6)]
+        min_ratio: f32,
+        #[arg(long, default_value_t = 4)]
+        max_depth: usize,
     },
 
     /// Reverse an applied run.
@@ -190,9 +207,15 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Apply { plan, yes, write_metadata } => {
+        Command::Apply { plan, yes, mode, write_metadata } => {
             let path = plan.unwrap_or_else(|| cfg.plan_path());
-            let plan = load_plan(path)?;
+            let mut plan = load_plan(path)?;
+            if let Some(mode) = mode {
+                if mode != plan.mode {
+                    println!("  Placing by {mode:?} instead of the planned {:?}.", plan.mode);
+                }
+                plan.mode = mode;
+            }
 
             println!("\n{}", report::summary(&plan));
             if write_metadata {
@@ -228,6 +251,10 @@ fn main() -> Result<()> {
             if let Some(manifest) = &outcome.manifest {
                 println!("\nundo with: sorting-hat undo {}", manifest.display());
             }
+        }
+
+        Command::Headings { file, min_ratio, max_depth } => {
+            outline::dump(&file, min_ratio, max_depth, cfg.extract.timeout_secs)?;
         }
 
         Command::Undo { manifest } => {
