@@ -65,6 +65,43 @@ impl LlamaBrain {
         Ok(Self { ctx, model, cfg: cfg.clone(), label: label("llama", &cfg.path) })
     }
 
+    /// Exactly how many tokens a prompt costs, according to the real tokeniser.
+    fn prompt_tokens(&self, system: &str, user: &str) -> usize {
+        let prompt = engine::wrap(&self.cfg.template, system, user);
+        self.model
+            .str_to_token(&prompt, llama_cpp_2::model::AddBos::Always)
+            .map(|t| t.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    /// The largest leading slice of `lines` whose prompt and reply both fit.
+    ///
+    /// Measured with the model's own tokeniser rather than estimated. Every
+    /// estimate of this has been wrong — seventeen tokens per candidate, then
+    /// twelve for the reply, against a real cost near twenty-two — and being
+    /// wrong is silent: the call is refused and the document quietly keeps its
+    /// unrefined headings.
+    fn fitting_batch(&self, lines: &[(usize, String, usize)]) -> usize {
+        let budget = (self.cfg.context as usize).saturating_sub(SAFETY_MARGIN);
+        let system = prompt::headings_system();
+        let mut take = lines.len().min(MAX_HEADING_BATCH);
+
+        while take > 1 {
+            let user = prompt::headings_user(&lines[..take]);
+            let cost = self
+                .prompt_tokens(&system, &user)
+                .saturating_add(heading_reply_budget(take) as usize);
+            if cost <= budget {
+                return take;
+            }
+            // Aim at the overshoot rather than halving blindly, so even a very
+            // long document settles in two or three measurements.
+            let over = cost as f64 / budget as f64;
+            take = (((take as f64 / over) * 0.9) as usize).clamp(1, take - 1);
+        }
+        1
+    }
+
     /// One grammar-constrained completion. Deterministic: greedy sampling.
     fn complete(
         &mut self,
@@ -157,13 +194,18 @@ that still fit and merge rather than duplicate:\n{}\n",
         if lines.is_empty() {
             return Ok(None);
         }
-        // A long book can offer more candidates than the window holds, so they
-        // are judged in batches; indices stay absolute so order is preserved.
-        let batch = heading_batch_size(self.cfg.context);
+        // A long book offers more candidates than the window holds, so they are
+        // judged in batches. Indices stay absolute, so order is preserved
+        // however the batches fall.
         let mut kept: Vec<(usize, usize)> = Vec::new();
         let highest = lines.iter().map(|(i, _, _)| *i).max().unwrap_or(0);
+        let mut rest = lines;
 
-        for chunk in lines.chunks(batch) {
+        while !rest.is_empty() {
+            let take = self.fitting_batch(rest);
+            let (chunk, remainder) = rest.split_at(take);
+            rest = remainder;
+
             let picks: Vec<super::Selection> = self.complete_json(
                 &prompt::headings_system(),
                 &prompt::headings_user(chunk),
@@ -208,44 +250,26 @@ that still fit and merge rather than duplicate:\n{}\n",
 }
 
 /// Roughly how many catalogue lines fit alongside the instructions.
-/// How many heading candidates fit alongside the instructions *and* the reply.
-///
-/// Both halves have to fit: a candidate costs roughly 17 tokens to state and
-/// up to 12 more to answer, since the reply repeats its index and level. Sizing
-/// on the prompt alone overflowed the window — 292 candidates asked for 4884
-/// tokens of prompt and reserved 3568 for output against a limit of 8192 — and
-/// every book that big silently fell back to the unrefined guess.
-fn heading_batch_size(context: u32) -> usize {
-    const PER_CANDIDATE: usize = HEADING_PROMPT_TOKENS + HEADING_REPLY_TOKENS;
-    // Solved rather than clamped: a floor of twenty candidates is meaningless
-    // if twenty do not fit, and clamping upwards is how the overflow got in.
-    let usable = (context as usize)
-        .saturating_sub(HEADING_OVERHEAD_TOKENS + REPLY_SLACK + SAFETY_MARGIN);
-    (usable / PER_CANDIDATE).clamp(1, 200)
-}
-
-/// Fixed part of the reply budget, on top of the per-candidate cost.
-const REPLY_SLACK: usize = 64;
-/// Every figure here is an estimate of how a tokeniser will behave, so filling
-/// the window exactly is not filling it safely.
-const SAFETY_MARGIN: usize = 128;
-
-/// Tokens one candidate line costs in the prompt.
-const HEADING_PROMPT_TOKENS: usize = 17;
 /// Tokens one kept candidate costs in the reply.
 ///
 /// `{"i":123,"l":1},` is about eleven; the allowance is deliberately generous
 /// because running out mid-array yields unparseable JSON and the entire answer
 /// is discarded, not merely shortened.
 const HEADING_REPLY_TOKENS: usize = 16;
-/// Instructions, chat template and slack.
-const HEADING_OVERHEAD_TOKENS: usize = 600;
+/// Fixed part of the reply budget, on top of the per-candidate cost.
+const REPLY_SLACK: usize = 64;
+/// Room left over the measured prompt, for the chat template and rounding.
+const SAFETY_MARGIN: usize = 256;
+/// Never ask about more than this many candidates at once, however large the
+/// window: a reply of thousands of entries is slow and hard to check.
+const MAX_HEADING_BATCH: usize = 200;
 
 /// Output budget for a batch of `n` candidates, in the worst case where the
 /// model keeps every one of them.
 fn heading_reply_budget(n: usize) -> i32 {
     (n * HEADING_REPLY_TOKENS + REPLY_SLACK) as i32
 }
+
 
 fn catalogue_batch_size(context: u32) -> usize {
     // ~30 tokens per catalogue line, leaving half the window for output and slack.
@@ -256,30 +280,13 @@ fn catalogue_batch_size(context: u32) -> usize {
 mod budget {
     use super::*;
 
-    /// A batch must leave room for its own reply. Getting this wrong does not
-    /// fail loudly: the call is refused and the caller quietly keeps the
-    /// unrefined guess, so the only symptom is worse output.
+    /// The worst case is the model keeping every candidate, which happens on
+    /// books whose large type really is all chapter headings.
     #[test]
-    fn a_batch_and_its_reply_fit_the_context() {
-        for context in [2048u32, 4096, 8192, 16384, 32768] {
-            let n = heading_batch_size(context);
-            let prompt = n * HEADING_PROMPT_TOKENS + HEADING_OVERHEAD_TOKENS;
-            let reply = heading_reply_budget(n) as usize;
-            assert!(
-                prompt + reply < context as usize,
-                "context {context}: {n} candidates need {prompt} + {reply} tokens"
-            );
+    fn a_reply_budget_covers_every_candidate_being_kept() {
+        for n in [1usize, 50, 200] {
+            assert!(heading_reply_budget(n) as usize >= n * 11 + 8, "{n} candidates");
         }
-    }
-
-    #[test]
-    fn batches_stay_within_sensible_bounds() {
-        assert!(heading_batch_size(1024) >= 1, "a tiny context still makes progress");
-        assert_eq!(heading_batch_size(1 << 20), 200, "a huge context stays batched");
-        assert!(
-            heading_batch_size(8192) > heading_batch_size(2048),
-            "a bigger window should take more at a time"
-        );
     }
 
     #[test]
