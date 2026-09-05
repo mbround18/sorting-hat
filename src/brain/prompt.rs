@@ -287,3 +287,42 @@ mod tests {
         assert_eq!(folder.matches('|').count(), 1, "escaped quote leaked an alternative: {folder}");
     }
 }
+
+pub fn headings_system() -> String {
+    "You are building the table of contents for a tabletop roleplaying game book. \
+You are given lines of large type taken from its pages, in reading order, \
+numbered. Some are real chapter and section headings. Others are not: sidebar \
+titles, spell or monster names in a list, decorative pull quotes, running \
+headers, advertisements, credits.\n\
+\n\
+Choose the lines a reader would want in a table of contents, and give each a \
+level: 0 for a part or chapter, 1 for a section within it, 2 for a subsection. \
+Keep them in the order given. Prefer too few to too many — a contents page of \
+every monster in the bestiary is no use to anyone.\n\
+\n\
+Answer only with a JSON array of {\"i\": line number, \"l\": level}."
+        .to_string()
+}
+
+pub fn headings_user(lines: &[(usize, String, usize)]) -> String {
+    let mut s = String::from("Lines of large type, in reading order:\n");
+    for (index, text, page) in lines {
+        s.push_str(&format!("{index}: {text}  (page {page})\n"));
+    }
+    s.push_str("\nWhich of these belong in the table of contents?\n");
+    s
+}
+
+/// Grammar for the heading selection: index and level only, so the model
+/// cannot invent a heading or a page number — it can only choose among the
+/// lines it was shown.
+pub fn headings_grammar(max_index: usize, max_level: usize) -> String {
+    let digits = max_index.to_string().len().max(1);
+    let level = max_level.saturating_sub(1).min(9);
+    format!(
+        r#"root ::= "[" ws (item (ws "," ws item)*)? ws "]"
+item ::= "{{" ws ""i":" ws index ws "," ws ""l":" ws [0-{level}] ws "}}"
+index ::= [0-9]{{1,{digits}}}
+{PRIMITIVES}"#
+    )
+}

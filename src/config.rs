@@ -15,6 +15,7 @@ pub struct Config {
     pub vision: VisionConfig,
     pub dedupe: DedupeConfig,
     pub systems: SystemsConfig,
+    pub bookmarks: BookmarkConfig,
     pub taxonomy: TaxonomyConfig,
 }
 
@@ -90,6 +91,27 @@ impl Default for VisionConfig {
     }
 }
 
+/// Building a chapter index for documents that have none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BookmarkConfig {
+    /// How much larger than body text a run must be to be a heading candidate.
+    pub min_ratio: f32,
+    /// Deepest nesting level written.
+    pub max_depth: usize,
+    /// Documents shorter than this are left alone; a bookmark tree earns its
+    /// place only where there is something to navigate.
+    pub min_pages: usize,
+    /// Fraction the file may grow before the rewrite is abandoned.
+    pub max_growth: f32,
+}
+
+impl Default for BookmarkConfig {
+    fn default() -> Self {
+        Self { min_ratio: 1.6, max_depth: 3, min_pages: 20, max_growth: 0.25 }
+    }
+}
+
 /// Game-system naming.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,6 +171,7 @@ impl Default for Config {
             vision: VisionConfig::default(),
             dedupe: DedupeConfig::default(),
             systems: SystemsConfig::default(),
+            bookmarks: BookmarkConfig::default(),
             taxonomy: TaxonomyConfig::default(),
         }
     }

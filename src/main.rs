@@ -133,7 +133,50 @@ enum Command {
         /// original, and stamping one would rewrite your source PDFs.
         #[arg(long)]
         write_metadata: bool,
+
+        /// Build a chapter index (PDF bookmarks) for documents that have none,
+        /// in the same rewrite as the metadata. Same mode requirement.
+        #[arg(long)]
+        write_bookmarks: bool,
+
+        /// Have the model judge which headings are real chapters. Without it,
+        /// type size alone decides: instant and free, but it keeps sidebar
+        /// titles and stat-block names that are not really chapters.
+        #[arg(long, requires = "write_bookmarks")]
+        refine: bool,
     },
+
+    /// Build a chapter index (PDF bookmarks) for documents that have none.
+    ///
+    /// Only ever touches the library, never the source tree. Documents that
+    /// cannot be rewritten — encrypted, damaged, or that would balloon in size —
+    /// are skipped and reported rather than risked.
+    Bookmark {
+        /// Have the model judge which headings are real. Without it, type size
+        /// alone decides: instant and free, but it keeps sidebar titles and
+        /// stat-block names that are not really chapters.
+        #[arg(long)]
+        refine: bool,
+
+        /// Rebuild the index even for documents that already have one.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip documents shorter than this.
+        #[arg(long)]
+        min_pages: Option<usize>,
+
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Stop after this many documents.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Report whether each file can be parsed for rewriting.
+    Loadable { files: Vec<PathBuf> },
 
     /// Show the chapter headings the font pass finds in one PDF.
     Headings {
@@ -207,7 +250,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Apply { plan, yes, mode, write_metadata } => {
+        Command::Apply { plan, yes, mode, write_metadata, write_bookmarks, refine } => {
             let path = plan.unwrap_or_else(|| cfg.plan_path());
             let mut plan = load_plan(path)?;
             if let Some(mode) = mode {
@@ -218,11 +261,17 @@ fn main() -> Result<()> {
             }
 
             println!("\n{}", report::summary(&plan));
-            if write_metadata {
+            if write_metadata || write_bookmarks {
                 // Fail before the prompt rather than after the work.
                 metadata::may_write(plan.mode)?;
-                println!("  Each filed PDF will be stamped with its title, author and keywords.\n");
             }
+            if write_metadata {
+                println!("  Each filed PDF will be stamped with its title, author and keywords.");
+            }
+            if write_bookmarks {
+                println!("  Documents without a chapter index will be given one.");
+            }
+            println!();
             if plan.mode == LinkMode::Move {
                 println!("  This MOVES the originals out of {}.\n", plan.source_root.display());
             }
@@ -232,7 +281,19 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let outcome = apply::apply(&plan, &cfg.work_dir, write_metadata)?;
+            let mut enrich = apply::Enrichment {
+                metadata: write_metadata,
+                outlines: Default::default(),
+                max_growth: cfg.bookmarks.max_growth,
+            };
+            if write_bookmarks {
+                // Prepared from the sources, before anything is written: the
+                // headings are read from pristine files rather than from
+                // copies this run has already rewritten.
+                enrich.outlines = prepare_outlines(&cfg, &plan, refine, &cli.common)?;
+            }
+
+            let outcome = apply::apply(&plan, &cfg.work_dir, write_metadata, &enrich)?;
             println!(
                 "\nfiled {}, already present {}, failed {}",
                 outcome.filed,
@@ -244,13 +305,48 @@ fn main() -> Result<()> {
             }
             if write_metadata {
                 println!("stamped {} PDFs, {} could not be stamped", outcome.stamped, outcome.stamp_failed.len());
-                for (path, err) in &outcome.stamp_failed {
+                for (path, err) in outcome.stamp_failed.iter().take(10) {
                     println!("  {} — {err}", path.display());
                 }
+                if outcome.stamp_failed.len() > 10 {
+                    println!("  ... and {} more", outcome.stamp_failed.len() - 10);
+                }
+            }
+            if write_bookmarks {
+                println!(
+                    "indexed {} documents with {} bookmarks",
+                    outcome.indexed, outcome.bookmarks
+                );
+                summarise_skips(&outcome.index_skipped);
             }
             if let Some(manifest) = &outcome.manifest {
                 println!("\nundo with: sorting-hat undo {}", manifest.display());
             }
+        }
+
+        Command::Bookmark { refine, force, min_pages, dry_run, limit } => {
+            let mut brain = if refine {
+                let brain = select_backend(&cli.common, &cfg)?;
+                tracing::info!(backend = brain.name(), "refining headings with the model");
+                Some(brain)
+            } else {
+                None
+            };
+            bookmark_library(&cfg, brain.as_deref_mut(), refine, force, min_pages, dry_run, limit)?;
+        }
+
+        Command::Loadable { files } => {
+            let (mut ok, mut bad) = (0usize, 0usize);
+            for f in &files {
+                match lopdf::Document::load(f) {
+                    Ok(_) => ok += 1,
+                    Err(err) => {
+                        bad += 1;
+                        println!("FAIL {err}  {}", f.display());
+                    }
+                }
+            }
+            println!("loadable={ok} failed={bad}");
         }
 
         Command::Headings { file, min_ratio, max_depth } => {
@@ -354,6 +450,240 @@ fn select_eyes(common: &Common, cfg: &config::Config) -> Option<Box<dyn pipeline
 #[cfg(not(feature = "llama"))]
 fn select_eyes(_common: &Common, _cfg: &config::Config) -> Option<Box<dyn pipeline::Eyes>> {
     None
+}
+
+/// Build a chapter index across the library.
+#[allow(clippy::too_many_arguments)]
+fn bookmark_library(
+    cfg: &config::Config,
+    mut brain: Option<&mut (dyn Brain + '_)>,
+    refine: bool,
+    force: bool,
+    min_pages: Option<usize>,
+    dry_run: bool,
+    limit: Option<usize>,
+) -> Result<()> {
+    let min_pages = min_pages.unwrap_or(cfg.bookmarks.min_pages);
+    let mut files = scan::find_pdfs(&cfg.library, &[])?;
+    if files.is_empty() {
+        anyhow::bail!(
+            "no PDFs under {}; run `sorting-hat apply` first",
+            cfg.library.display()
+        );
+    }
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+
+    let bar = indicatif::ProgressBar::new(files.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("indexing    [{bar:32}] {pos}/{len} {eta_precise}")
+            .expect("static template")
+            .progress_chars("=> "),
+    );
+
+    let mut indexed = 0usize;
+    let mut bookmarks = 0usize;
+    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
+
+    for file in &files {
+        bar.inc(1);
+
+        let pages = extract::page_count(file, cfg.extract.timeout_secs).unwrap_or(0);
+        if pages < min_pages {
+            skipped.push((file.clone(), outline::Skip::TooShort { pages }.to_string()));
+            continue;
+        }
+        // Checked before the expensive part: reading a document only to find it
+        // cannot be written wastes the whole effort.
+        match lopdf::Document::load(file) {
+            Ok(doc) => {
+                if doc.is_encrypted() {
+                    skipped.push((file.clone(), outline::Skip::Encrypted.to_string()));
+                    continue;
+                }
+                if !force && outline::has_outline(&doc) {
+                    skipped.push((file.clone(), outline::Skip::AlreadyIndexed.to_string()));
+                    continue;
+                }
+            }
+            Err(err) => {
+                skipped.push((file.clone(), outline::Skip::Unreadable(err.to_string()).to_string()));
+                continue;
+            }
+        }
+
+        let found = match outline::candidates(file, cfg.bookmarks.min_ratio, cfg.extract.timeout_secs)
+        {
+            Ok(found) if !found.is_empty() => found,
+            Ok(_) => {
+                skipped.push((file.clone(), outline::Skip::NoHeadings.to_string()));
+                continue;
+            }
+            Err(err) => {
+                skipped.push((file.clone(), format!("{err:#}")));
+                continue;
+            }
+        };
+
+        let mut entries = outline::nest(&found, cfg.bookmarks.max_depth);
+
+        if refine {
+            let lines: Vec<(usize, String, usize)> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (i, e.title.clone(), e.page))
+                .collect();
+            match brain.as_deref_mut().map(|b| b.refine_headings(&lines, cfg.bookmarks.max_depth)) {
+                Some(Ok(Some(picks))) if !picks.is_empty() => {
+                    entries = picks
+                        .into_iter()
+                        .filter_map(|(i, level)| {
+                            entries.get(i).map(|e| outline::Entry { level, ..e.clone() })
+                        })
+                        .collect();
+                }
+                Some(Err(err)) => {
+                    tracing::warn!(path = %file.display(), %err, "refinement failed; keeping the type-size guess");
+                }
+                _ => {}
+            }
+        }
+
+        if dry_run {
+            indexed += 1;
+            bookmarks += entries.len();
+            continue;
+        }
+
+        match outline::write(file, &entries, cfg.bookmarks.max_growth) {
+            Ok(n) => {
+                indexed += 1;
+                bookmarks += n;
+            }
+            Err(skip) => skipped.push((file.clone(), skip.to_string())),
+        }
+    }
+    bar.finish_and_clear();
+
+    println!();
+    if dry_run {
+        println!("would index {indexed} documents with {bookmarks} bookmarks");
+    } else {
+        println!("indexed {indexed} documents with {bookmarks} bookmarks");
+    }
+
+    if !skipped.is_empty() {
+        // Grouped by reason: forty lines of "only 4 pages" tells the user less
+        // than one line saying forty documents were too short.
+        let mut reasons: std::collections::BTreeMap<String, Vec<&PathBuf>> = Default::default();
+        for (path, why) in &skipped {
+            // Group on the reason, not its particulars: "grew from 4 to 9 bytes"
+            // and "grew from 5 to 11" are one story, told once.
+            let key = why.split(" from ").next().unwrap_or(why).to_string();
+            reasons.entry(key).or_default().push(path);
+        }
+        println!("\nleft alone ({}):", skipped.len());
+        for (why, paths) in &reasons {
+            println!("  {} — {why}", paths.len());
+            for path in paths.iter().take(3) {
+                println!("      {}", path.display());
+            }
+            if paths.len() > 3 {
+                println!("      ... and {} more", paths.len() - 3);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read chapter headings from every source document that wants an index.
+///
+/// Done before anything is written, and always from the source rather than the
+/// filed copy, so the headings come out of a pristine file.
+fn prepare_outlines(
+    cfg: &config::Config,
+    plan: &Plan,
+    refine: bool,
+    common: &Common,
+) -> Result<std::collections::HashMap<PathBuf, Vec<outline::Entry>>> {
+    let mut brain = if refine {
+        let brain = select_backend(common, cfg)?;
+        tracing::info!(backend = brain.name(), "refining headings with the model");
+        Some(brain)
+    } else {
+        None
+    };
+
+    let bar = indicatif::ProgressBar::new(plan.assignments.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::with_template("headings    [{bar:32}] {pos}/{len} {eta_precise}")
+            .expect("static template")
+            .progress_chars("=> "),
+    );
+
+    let mut out = std::collections::HashMap::new();
+    for assignment in &plan.assignments {
+        bar.inc(1);
+        let source = &assignment.source;
+
+        let pages = extract::page_count(source, cfg.extract.timeout_secs).unwrap_or(0);
+        if pages < cfg.bookmarks.min_pages {
+            continue;
+        }
+
+        let found =
+            match outline::candidates(source, cfg.bookmarks.min_ratio, cfg.extract.timeout_secs) {
+                Ok(found) if !found.is_empty() => found,
+                _ => continue,
+            };
+        let mut entries = outline::nest(&found, cfg.bookmarks.max_depth);
+
+        if let Some(brain) = brain.as_deref_mut() {
+            let lines: Vec<(usize, String, usize)> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (i, e.title.clone(), e.page))
+                .collect();
+            match brain.refine_headings(&lines, cfg.bookmarks.max_depth) {
+                Ok(Some(picks)) if !picks.is_empty() => {
+                    entries = picks
+                        .into_iter()
+                        .filter_map(|(i, level)| {
+                            entries.get(i).map(|e| outline::Entry { level, ..e.clone() })
+                        })
+                        .collect();
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(
+                    path = %source.display(), %err,
+                    "refinement failed; keeping the type-size guess"
+                ),
+            }
+        }
+
+        if !entries.is_empty() {
+            out.insert(source.clone(), entries);
+        }
+    }
+    bar.finish_and_clear();
+    tracing::info!(documents = out.len(), "chapter headings prepared");
+    Ok(out)
+}
+
+/// Print skip reasons grouped, so one story is told once.
+fn summarise_skips(skipped: &[(PathBuf, String)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let mut reasons: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (_, why) in skipped {
+        *reasons.entry(why.split(" from ").next().unwrap_or(why)).or_default() += 1;
+    }
+    println!("  left alone ({}):", skipped.len());
+    for (why, count) in &reasons {
+        println!("    {count} — {why}");
+    }
 }
 
 fn load_plan(path: PathBuf) -> Result<Plan> {

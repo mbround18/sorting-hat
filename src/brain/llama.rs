@@ -149,6 +149,45 @@ that still fit and merge rather than duplicate:\n{}\n",
         Ok(Taxonomy { leaves, notes: Vec::new() })
     }
 
+    fn refine_headings(
+        &mut self,
+        lines: &[(usize, String, usize)],
+        max_level: usize,
+    ) -> Result<Option<Vec<(usize, usize)>>> {
+        if lines.is_empty() {
+            return Ok(None);
+        }
+        // A long book can offer more candidates than the window holds, so they
+        // are judged in batches; indices stay absolute so order is preserved.
+        let batch = heading_batch_size(self.cfg.context);
+        let mut kept: Vec<(usize, usize)> = Vec::new();
+        let highest = lines.iter().map(|(i, _, _)| *i).max().unwrap_or(0);
+
+        for chunk in lines.chunks(batch) {
+            let picks: Vec<super::Selection> = self.complete_json(
+                &prompt::headings_system(),
+                &prompt::headings_user(chunk),
+                &prompt::headings_grammar(highest, max_level),
+                (chunk.len() * 12 + 64).min(4096) as i32,
+            )?;
+            // The grammar bounds the shape, not the meaning: an index outside
+            // this batch is a mistake, and dropping it costs one heading rather
+            // than corrupting the outline.
+            let valid: std::collections::HashSet<usize> =
+                chunk.iter().map(|(i, _, _)| *i).collect();
+            kept.extend(
+                picks
+                    .into_iter()
+                    .filter(|p| valid.contains(&p.i))
+                    .map(|p| (p.i, p.l.min(max_level.saturating_sub(1)))),
+            );
+        }
+
+        kept.sort_by_key(|(i, _)| *i);
+        kept.dedup_by_key(|(i, _)| *i);
+        Ok(Some(kept))
+    }
+
     fn file(&mut self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing> {
         let filing: Filing = self.complete_json(
             &prompt::assign_system(),
@@ -169,6 +208,12 @@ that still fit and merge rather than duplicate:\n{}\n",
 }
 
 /// Roughly how many catalogue lines fit alongside the instructions.
+/// How many heading candidates fit alongside the instructions.
+fn heading_batch_size(context: u32) -> usize {
+    // ~14 tokens per candidate line, leaving room for the reply.
+    ((context as usize / 2) / 14).clamp(20, 300)
+}
+
 fn catalogue_batch_size(context: u32) -> usize {
     // ~30 tokens per catalogue line, leaving half the window for output and slack.
     ((context as usize / 2) / 30).clamp(20, 400)

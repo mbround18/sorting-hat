@@ -20,6 +20,13 @@ use serde::Deserialize;
 use crate::config::TaxonomyConfig;
 use crate::types::{Digest, Probe, Taxonomy};
 
+/// One selected heading: which line, and how deep it sits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Selection {
+    pub i: usize,
+    pub l: usize,
+}
+
 /// A filing decision for one document.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Filing {
@@ -65,6 +72,19 @@ pub trait Brain {
     fn design_taxonomy(&mut self, corpus: &[Digest], cfg: &TaxonomyConfig) -> Result<Taxonomy>;
 
     fn file(&mut self, digest: &Digest, taxonomy: &Taxonomy) -> Result<Filing>;
+
+    /// Choose which lines of large type are real headings, and how they nest.
+    ///
+    /// Returns `(index, level)` pairs referring to the lines given. Backends
+    /// that cannot judge this return `None`, and the caller keeps the
+    /// type-size guess.
+    fn refine_headings(
+        &mut self,
+        _lines: &[(usize, String, usize)],
+        _max_level: usize,
+    ) -> Result<Option<Vec<(usize, usize)>>> {
+        Ok(None)
+    }
 }
 
 /// Extract the first balanced JSON value from a model response.

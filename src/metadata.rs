@@ -82,19 +82,33 @@ fn entries(digest: &Digest) -> Vec<(&'static str, String)> {
 ///
 /// Returns the field names actually written.
 pub fn stamp(path: &Path, digest: &Digest, overwrite: bool) -> Result<Vec<&'static str>> {
-    let fields = entries(digest);
-    if fields.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let mut doc = Document::load(path)
         .with_context(|| format!("reading {} for metadata", path.display()))?;
     if doc.is_encrypted() {
         return Err(anyhow!("PDF is encrypted; leaving its metadata alone"));
     }
+    let written = apply_to_doc(&mut doc, digest, overwrite);
+    if written.is_empty() {
+        return Ok(written);
+    }
+    save_atomically(&mut doc, path)?;
+    Ok(written)
+}
 
-    let mut info = current_info(&doc);
-    let mut written = Vec::new();
+/// Set the Info dictionary on an already-loaded document.
+///
+/// Separate from [`stamp`] so that metadata and a bookmark tree can be written
+/// in one load and one save. lopdf cannot always re-read what it just wrote —
+/// 91 of 247 files here — so a second pass over its own output is not an
+/// option, and every change a document needs must happen together.
+pub fn apply_to_doc(doc: &mut Document, digest: &Digest, overwrite: bool) -> Vec<&'static str> {
+    let fields = entries(digest);
+    if fields.is_empty() {
+        return Vec::new();
+    }
+
+    let mut info = current_info(doc);
+    let mut written: Vec<&'static str> = Vec::new();
     for (key, value) in fields {
         let occupied = info
             .get(key.as_bytes())
@@ -108,7 +122,7 @@ pub fn stamp(path: &Path, digest: &Digest, overwrite: bool) -> Result<Vec<&'stat
         written.push(key);
     }
     if written.is_empty() {
-        return Ok(written);
+        return written;
     }
 
     // Record who did this, so a later run can tell a stamped file from an
@@ -117,9 +131,7 @@ pub fn stamp(path: &Path, digest: &Digest, overwrite: bool) -> Result<Vec<&'stat
 
     let id = doc.add_object(Object::Dictionary(info));
     doc.trailer.set("Info", Object::Reference(id));
-
-    save_atomically(&mut doc, path)?;
-    Ok(written)
+    written
 }
 
 fn current_info(doc: &Document) -> Dictionary {
@@ -141,7 +153,7 @@ fn current_info(doc: &Document) -> Dictionary {
 /// one 2.8 MB rulebook became 8.2 MB in testing. `compress` puts the streams
 /// back; if the result is still wildly different from the original, the stamp
 /// is abandoned and the good file left alone.
-fn save_atomically(doc: &mut Document, path: &Path) -> Result<()> {
+pub fn save_atomically(doc: &mut Document, path: &Path) -> Result<()> {
     let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     doc.compress();

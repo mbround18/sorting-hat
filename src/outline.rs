@@ -342,3 +342,224 @@ pub fn dump(path: &Path, min_ratio: f32, max_depth: usize, timeout_secs: u64) ->
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Writing the tree into the PDF
+// ---------------------------------------------------------------------------
+
+use lopdf::{Dictionary, Document, Object, ObjectId};
+
+/// Why a document was left alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Skip {
+    AlreadyIndexed,
+    Encrypted,
+    TooShort { pages: usize },
+    NoHeadings,
+    Unreadable(String),
+    WouldBloat { before: u64, after: u64 },
+}
+
+impl std::fmt::Display for Skip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyIndexed => write!(f, "already has a bookmark tree"),
+            Self::Encrypted => write!(f, "encrypted; cannot be rewritten"),
+            Self::TooShort { .. } => write!(f, "shorter than the page minimum"),
+            Self::NoHeadings => write!(f, "no headings stand out from the body text"),
+            Self::Unreadable(why) => write!(f, "could not be read: {why}"),
+            Self::WouldBloat { before, after } => {
+                write!(f, "rewriting grew it from {before} to {after} bytes")
+            }
+        }
+    }
+}
+
+/// Whether the document already carries a bookmark tree worth keeping.
+pub fn has_outline(doc: &Document) -> bool {
+    doc.catalog()
+        .ok()
+        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|o| o.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|o| o.as_dict().ok())
+        .is_some_and(|d| d.has(b"First"))
+}
+
+/// A heading and everything nested beneath it.
+struct Node {
+    title: String,
+    page: usize,
+    children: Vec<Node>,
+}
+
+/// Turn the flat, ordered list into a tree.
+///
+/// A level that jumps by more than one — a subsection with no section above it —
+/// is attached to whatever is currently open, rather than being dropped.
+fn tree(entries: &[Entry]) -> Vec<Node> {
+    let mut roots: Vec<Node> = Vec::new();
+    // Path of indices into the tree, one per open level.
+    let mut open: Vec<usize> = Vec::new();
+
+    for entry in entries {
+        let node = Node { title: entry.title.clone(), page: entry.page, children: Vec::new() };
+        let depth = entry.level.min(open.len());
+        open.truncate(depth);
+
+        let mut current = &mut roots;
+        for index in &open {
+            current = &mut current[*index].children;
+        }
+        current.push(node);
+        open.push(current.len() - 1);
+    }
+    roots
+}
+
+fn count_nodes(nodes: &[Node]) -> usize {
+    nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
+}
+
+/// Write `entries` as the document's bookmark tree.
+///
+/// Returns the number of bookmarks written.
+pub fn write(path: &Path, entries: &[Entry], max_growth: f32) -> std::result::Result<usize, Skip> {
+    let mut doc = Document::load(path).map_err(|e| Skip::Unreadable(e.to_string()))?;
+    if doc.is_encrypted() {
+        return Err(Skip::Encrypted);
+    }
+    if has_outline(&doc) {
+        return Err(Skip::AlreadyIndexed);
+    }
+    let total = apply_to_doc(&mut doc, entries)?;
+    save_guarded(&mut doc, path, max_growth)?;
+    Ok(total)
+}
+
+/// Build the bookmark tree on an already-loaded document.
+///
+/// Separate from [`write`] so metadata and bookmarks share one load and one
+/// save: lopdf cannot reliably re-read its own output, so a document gets
+/// exactly one rewrite and every change has to be part of it.
+pub fn apply_to_doc(doc: &mut Document, entries: &[Entry]) -> std::result::Result<usize, Skip> {
+    if entries.is_empty() {
+        return Err(Skip::NoHeadings);
+    }
+
+    let pages: BTreeMap<u32, ObjectId> = doc.get_pages();
+    if pages.is_empty() {
+        return Err(Skip::Unreadable("no pages".into()));
+    }
+    let last_page = *pages.keys().max().unwrap_or(&1);
+
+    // Drop anything pointing past the end: a bookmark to a page that does not
+    // exist makes a reader reject the whole outline.
+    let entries: Vec<Entry> = entries
+        .iter()
+        .filter(|e| e.page >= 1 && e.page as u32 <= last_page)
+        .cloned()
+        .collect();
+    if entries.is_empty() {
+        return Err(Skip::NoHeadings);
+    }
+
+    let roots = tree(&entries);
+    let total = count_nodes(&roots);
+
+    let outlines_id = doc.new_object_id();
+    let (first, last) =
+        write_level(doc, &roots, outlines_id, &pages).ok_or(Skip::NoHeadings)?;
+
+    let mut root = Dictionary::new();
+    root.set("Type", Object::Name(b"Outlines".to_vec()));
+    root.set("First", Object::Reference(first));
+    root.set("Last", Object::Reference(last));
+    root.set("Count", Object::Integer(total as i64));
+    doc.objects.insert(outlines_id, Object::Dictionary(root));
+
+    let catalog_id = doc
+        .trailer
+        .get(b"Root")
+        .and_then(|o| o.as_reference())
+        .map_err(|e| Skip::Unreadable(e.to_string()))?;
+    if let Ok(Object::Dictionary(catalog)) = doc.get_object_mut(catalog_id) {
+        catalog.set("Outlines", Object::Reference(outlines_id));
+        // Ask readers to show the tree when the document opens.
+        catalog.set("PageMode", Object::Name(b"UseOutlines".to_vec()));
+    }
+    Ok(total)
+}
+
+/// Write one level of siblings, returning the first and last object ids.
+fn write_level(
+    doc: &mut Document,
+    nodes: &[Node],
+    parent: ObjectId,
+    pages: &BTreeMap<u32, ObjectId>,
+) -> Option<(ObjectId, ObjectId)> {
+    if nodes.is_empty() {
+        return None;
+    }
+    let ids: Vec<ObjectId> = nodes.iter().map(|_| doc.new_object_id()).collect();
+
+    for (index, node) in nodes.iter().enumerate() {
+        let children = write_level(doc, &node.children, ids[index], pages);
+
+        let mut dict = Dictionary::new();
+        dict.set("Title", Object::string_literal(node.title.clone()));
+        dict.set("Parent", Object::Reference(parent));
+
+        // Land at the top of the page rather than a remembered scroll position.
+        let page_id = pages
+            .get(&(node.page as u32))
+            .copied()
+            .or_else(|| pages.values().next().copied())?;
+        dict.set(
+            "Dest",
+            Object::Array(vec![
+                Object::Reference(page_id),
+                Object::Name(b"XYZ".to_vec()),
+                Object::Null,
+                Object::Null,
+                Object::Null,
+            ]),
+        );
+
+        if index > 0 {
+            dict.set("Prev", Object::Reference(ids[index - 1]));
+        }
+        if index + 1 < ids.len() {
+            dict.set("Next", Object::Reference(ids[index + 1]));
+        }
+        if let Some((first, last)) = children {
+            dict.set("First", Object::Reference(first));
+            dict.set("Last", Object::Reference(last));
+            // Negative: children exist but start collapsed, so a long book does
+            // not open as a wall of subsections.
+            dict.set("Count", Object::Integer(-(count_nodes(&node.children) as i64)));
+        }
+
+        doc.objects.insert(ids[index], Object::Dictionary(dict));
+    }
+
+    Some((ids[0], *ids.last()?))
+}
+
+/// Save beside the file and rename over it, refusing a rewrite that bloats.
+fn save_guarded(doc: &mut Document, path: &Path, max_growth: f32) -> std::result::Result<(), Skip> {
+    let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    doc.compress();
+
+    let tmp = path.with_extension("pdf.sorting-hat-tmp");
+    doc.save(&tmp).map_err(|e| Skip::Unreadable(e.to_string()))?;
+    let after = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+
+    let ceiling = before + ((before as f32 * max_growth) as u64).max(1 << 20);
+    if before > 0 && (after > ceiling || after < before / 2) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Skip::WouldBloat { before, after });
+    }
+    std::fs::rename(&tmp, path).map_err(|e| Skip::Unreadable(e.to_string()))?;
+    Ok(())
+}
