@@ -321,8 +321,9 @@ fn main() -> Result<()> {
         }
 
         Command::Apply { plan, yes, mode, dry_run } => {
-            let path = plan.unwrap_or_else(|| cfg.plan_path());
-            let mut plan = load_plan(path)?;
+            let plan_path = plan.unwrap_or_else(|| cfg.plan_path());
+            let mut plan = load_plan(plan_path.clone())?;
+            let planned_mode = plan.mode;
             if let Some(mode) = mode {
                 if mode != plan.mode {
                     println!("  Placing by {mode:?} instead of the planned {:?}.", plan.mode);
@@ -347,6 +348,17 @@ fn main() -> Result<()> {
             }
 
             let outcome = apply::apply(&plan, &cfg.work_dir)?;
+
+            // Record how the files were actually placed. `metadata` and
+            // `bookmarks` read this to decide whether writing into them would
+            // reach through to the source, and a plan that still claimed
+            // "hardlink" after a copy made them refuse work that was safe.
+            if mode.is_some_and(|m| m != planned_mode) {
+                let path = plan_path.clone();
+                std::fs::write(&path, serde_json::to_vec_pretty(&plan)?)
+                    .with_context(|| format!("recording the placement in {}", path.display()))?;
+            }
+
             report_apply(&outcome);
 
             if matches!(plan.mode, LinkMode::Copy | LinkMode::Move) {

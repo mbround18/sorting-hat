@@ -171,7 +171,14 @@ fn one(source: &Path, dest: &Path, wanted: &Wanted<'_>, max_growth: f32) -> Resu
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // From the source every time, so lopdf never reads its own output.
+    // Unlink before copying. Copying onto a hard link writes straight through
+    // to the original, so a library placed by link would have its sources
+    // rewritten — removing the entry first breaks that connection and leaves a
+    // genuinely separate file.
+    if dest.exists() {
+        std::fs::remove_file(dest)
+            .with_context(|| format!("clearing {}", dest.display()))?;
+    }
     std::fs::copy(source, dest)
         .with_context(|| format!("restoring {} from its source", dest.display()))?;
 
